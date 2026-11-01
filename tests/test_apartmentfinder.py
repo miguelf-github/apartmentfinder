@@ -190,6 +190,145 @@ class RankerGateTests(unittest.TestCase):
         self.assertNotEqual(ranker.classify(self.listing(), prefs_soft)["tier"], "excluded")
 
 
+class HasDataTests(unittest.TestCase):
+    def test_normalize_row(self):
+        item = {"zpid": "12345", "url": "https://www.zillow.com/homedetails/12345_zpid/",
+                "unformattedPrice": 2100, "beds": 2, "baths": 1, "area": 880,
+                "address": {"streetAddress": "5 Elm St", "city": "Springfield", "state": "IL", "zipcode": "62701"},
+                "latLong": {"latitude": 39.78, "longitude": -89.65},
+                "homeType": "APARTMENT", "daysOnZillow": 3, "statusType": "FOR_RENT"}
+        rec = apartmentfinder.normalize_hasdata(item)
+        self.assertEqual(rec["source"], "hasdata-zillow")
+        self.assertEqual(rec["rent"], 2100.0)
+        self.assertEqual(rec["zip"], "62701")
+        self.assertEqual(rec["latitude"], 39.78)
+        self.assertEqual(rec["days_on_market"], 3)
+
+    def test_requires_key_and_parses(self):
+        self.assertEqual(apartmentfinder.hasdata_listings("", {"keyword": "X"}), [])
+        payload = {"listings": [{"zpid": "9", "price": "$1,900/mo", "beds": 1,
+                                 "address": "7 Oak Ave, Springfield, IL 62701"}]}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload) as fj:
+            records = apartmentfinder.hasdata_listings("k", {"keyword": "Springfield, IL"}, limit=5)
+        self.assertIn("api.hasdata.com/scrape/zillow/listing", fj.call_args[0][0])
+        self.assertEqual(fj.call_args.kwargs["headers"]["x-api-key"], "k")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["rent"], 1900.0)
+
+
+class EnrichmentProviderTests(unittest.TestCase):
+    def test_walkscore_parse(self):
+        payload = {"status": 1, "walkscore": 82, "transit": {"score": 55}, "bike": {"score": 70}}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            out = apartmentfinder.walkscore_scores("k", 39.7, -89.6, "1 Main St")
+        self.assertEqual(out["walk_score"], 82.0)
+        self.assertEqual(out["transit_score"], 55.0)
+        with self.assertRaises(apartmentfinder.FetchBlocked):
+            apartmentfinder.walkscore_scores("", 39.7, -89.6, "1 Main St")
+
+    def test_rentcast_avm_parse(self):
+        payload = {"rent": 2350, "rentRangeLow": 2200, "rentRangeHigh": 2500}
+        listing = {"address": "1 Main St, Springfield, IL 62701", "beds": 2.0, "baths": 1.0, "sqft": 900.0}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            out = apartmentfinder.rentcast_avm("k", listing)
+        self.assertEqual(out["rent_estimate"], 2350.0)
+
+    def test_hud_fmr_finds_bedroom_figure(self):
+        payload = {"data": {"basicdata": [{"zipcode": "62701", "Two-Bedroom": 1425, "One-Bedroom": 1180}]}}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            out = apartmentfinder.hud_fmr("tok", "62701", 2.0)
+        self.assertEqual(out["fmr_rent"], 1425.0)
+
+    def test_census_acs_flow(self):
+        geo = {"result": {"geographies": {"Census Tracts": [
+            {"STATE": "17", "COUNTY": "167", "TRACT": "010000", "GEOID": "17167010000"}]}}}
+        acs = [["B25064_001E", "B19013_001E", "state", "county", "tract"],
+               ["1550", "72000", "17", "167", "010000"]]
+        with mock.patch.object(apartmentfinder, "fetch_json", side_effect=[geo, acs]):
+            out = apartmentfinder.census_acs(39.78, -89.65)
+        self.assertEqual(out["tract_median_gross_rent"], 1550.0)
+        self.assertEqual(out["tract_median_household_income"], 72000.0)
+
+    def test_fema_zone(self):
+        payload = {"features": [{"attributes": {"FLD_ZONE": "AE", "ZONE_SUBTY": ""}}]}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            out = apartmentfinder.fema_flood(39.78, -89.65)
+        self.assertEqual(out["flood_zone"], "AE")
+
+    def test_airnow_worst_aqi(self):
+        payload = [{"ParameterName": "PM2.5", "AQI": 42, "Category": {"Name": "Good"}},
+                   {"ParameterName": "O3", "AQI": 61, "Category": {"Name": "Moderate"}}]
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            out = apartmentfinder.airnow_aqi("k", 39.78, -89.65)
+        self.assertEqual(out["aqi"], 61)
+        self.assertEqual(out["aqi_category"], "Moderate")
+
+
+class EnrichFlowTests(unittest.TestCase):
+    def test_migration_adds_columns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            con = apartmentfinder.database(Path(temp))
+            cols = {r[1] for r in con.execute("PRAGMA table_info(listings)")}
+            for col in ("walk_score", "rent_estimate", "fmr_rent", "flood_zone"):
+                self.assertIn(col, cols)
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("enrichment", tables)
+            con.close()
+
+    def test_enrich_keyless_providers_and_skip_notes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "evidence").mkdir()
+            con = apartmentfinder.database(root)
+            rec = apartmentfinder.normalize_hasdata({
+                "zpid": "77", "url": "https://www.zillow.com/homedetails/77_zpid/",
+                "unformattedPrice": 2000, "beds": 2, "baths": 1, "area": 850,
+                "address": "1 Main St, Springfield, IL 62701",
+                "latLong": {"latitude": 39.78, "longitude": -89.65}})
+            apartmentfinder.store_listing(con, root, rec)
+            listing = dict(con.execute("SELECT * FROM listings").fetchone())
+
+            def dispatch(url, timeout=25, headers=None):
+                if "geocoding.geo.census.gov" in url:
+                    return {"result": {"geographies": {"Census Tracts": [
+                        {"STATE": "17", "COUNTY": "167", "TRACT": "010000", "GEOID": "17167010000"}]}}}
+                if "api.census.gov" in url:
+                    return [["B25064_001E", "B19013_001E"], ["1500", "70000"]]
+                if "hazards.fema.gov" in url:
+                    return {"features": [{"attributes": {"FLD_ZONE": "X", "ZONE_SUBTY": ""}}]}
+                raise AssertionError(f"unexpected url {url}")
+
+            with mock.patch.object(apartmentfinder, "fetch_json", side_effect=dispatch):
+                notes = apartmentfinder.enrich_listing(
+                    con, listing, ["walkscore", "census-acs", "fema-flood"], {})
+            joined = "; ".join(notes)
+            self.assertIn("walkscore: no WALKSCORE_API_KEY", joined)
+            self.assertIn("census-acs: ok", joined)
+            self.assertIn("fema-flood: ok", joined)
+            row = con.execute("SELECT flood_zone FROM listings").fetchone()
+            self.assertEqual(row[0], "X")
+            providers = {r[0] for r in con.execute("SELECT provider FROM enrichment")}
+            self.assertEqual(providers, {"census-acs", "fema-flood"})
+            con.close()
+
+
+class RankerEnrichmentTests(unittest.TestCase):
+    def test_walk_gate_excludes_low_score_only_when_known(self):
+        prefs = dict(RankerGateTests.PREFS, location_quality={"min_walk_score": 70})
+        base = RankerGateTests().listing()
+        self.assertEqual(ranker.classify(dict(base, walk_score=45.0), prefs)["tier"], "excluded")
+        result = ranker.classify(dict(base, walk_score=None), prefs)
+        self.assertNotEqual(result["tier"], "excluded")
+        self.assertIn("walk score unknown", result["gaps"])
+
+    def test_over_estimate_penalty_and_note(self):
+        base = RankerGateTests().listing()
+        plain = ranker.classify(base, RankerGateTests.PREFS)
+        over = ranker.classify(dict(base, rent_estimate=1800.0), RankerGateTests.PREFS)
+        self.assertLess(over["score"], plain["score"])
+        self.assertTrue(any("over RentCast estimate" in n for n in over["reasons"]))
+
+
 class PreferenceQueryTests(unittest.TestCase):
     def test_queries_from_locations(self):
         prefs = {"locations": [{"city": "Springfield", "state": "IL", "zip": "62701"},

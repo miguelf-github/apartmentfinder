@@ -91,6 +91,14 @@ def classify(listing: dict, prefs: dict) -> dict:
     for phrase in prefs.get("deal_breakers") or []:
         if phrase and _contains(text, str(phrase)):
             reasons.append(f"deal-breaker present: '{phrase}'")
+    quality = prefs.get("location_quality") or {}
+    min_walk = quality.get("min_walk_score")
+    walk = listing.get("walk_score")
+    if min_walk is not None:
+        if walk is None:
+            gaps.append("walk score unknown")
+        elif walk < min_walk:
+            reasons.append(f"walk score {walk:g} below min {min_walk:g}")
     must_have = [str(m) for m in (prefs.get("must_have") or []) if m]
     missing_must = [m for m in must_have if not _contains(text, m)]
     if missing_must and prefs.get("must_have_strict"):
@@ -131,9 +139,26 @@ def classify(listing: dict, prefs: dict) -> dict:
         if phrase and _contains(text, str(phrase)):
             score += 5
     score -= 6 * len(missing_must)  # non-strict must-haves still cost points
+    if walk is not None:
+        if walk >= 80:
+            score += 8
+        elif walk >= 60:
+            score += 4
+        elif walk < 40:
+            score -= 4
+    estimate = listing.get("rent_estimate")
+    over_note = ""
+    if rent is not None and estimate:
+        if rent > estimate * 1.10:
+            score -= 10
+            over_note = f"listed {round((rent / estimate - 1) * 100):g}% over RentCast estimate ${estimate:,.0f}"
+        elif rent < estimate * 0.95:
+            score += 8
     score = max(0, min(100, score))
     tier = "strong" if score >= 70 else "good" if score >= 45 else "weak"
     notes = ([f"missing must-have(s): {', '.join(missing_must)}"] if missing_must else []) + gaps
+    if over_note:
+        notes.append(over_note)
     return {"tier": tier, "score": score, "reasons": notes, "gaps": gaps}
 
 
@@ -173,7 +198,9 @@ def main() -> int:
         layout_bits = " ".join(b for b in [
             f"{row['beds']:g}bd" if row.get("beds") is not None else "",
             f"{row['baths']:g}ba" if row.get("baths") is not None else "",
-            f"{row['sqft']:,.0f}sqft" if row.get("sqft") else ""] if b)
+            f"{row['sqft']:,.0f}sqft" if row.get("sqft") else "",
+            f"walk {row['walk_score']:g}" if row.get("walk_score") is not None else "",
+            f"est ${row['rent_estimate']:,.0f}" if row.get("rent_estimate") else ""] if b)
         print(f"[{result['tier']:8} {result['score']:3}] {rent:12} {layout_bits:18} "
               f"{row.get('title') or ''} ({row.get('source')})")
         for reason in result["reasons"]:

@@ -28,7 +28,8 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-UA = "Apartmentfinder/0.1 (research-and-review)"
+UA = "Apartmentfinder/0.2 (research-and-review)"
+VERSION = "0.2.0"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -482,7 +483,20 @@ def database(root: Path) -> sqlite3.Connection:
       state TEXT NOT NULL, note TEXT, updated_at TEXT NOT NULL,
       contact TEXT, tour_at TEXT, applied_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS enrichment (
+      listing_key TEXT NOT NULL REFERENCES listings(key),
+      provider TEXT NOT NULL, payload TEXT NOT NULL, fetched_at TEXT NOT NULL,
+      PRIMARY KEY (listing_key, provider)
+    );
     """)
+    # v0.2 migration: enrichment columns land on existing ledgers in place.
+    existing = {row[1] for row in con.execute("PRAGMA table_info(listings)")}
+    for column, ddl in (("walk_score", "REAL"), ("transit_score", "REAL"),
+                        ("bike_score", "REAL"), ("rent_estimate", "REAL"),
+                        ("fmr_rent", "REAL"), ("flood_zone", "TEXT")):
+        if column not in existing:
+            con.execute(f"ALTER TABLE listings ADD COLUMN {column} {ddl}")
+    con.commit()
     return con
 
 
@@ -523,6 +537,320 @@ def store_listing(con: sqlite3.Connection, root: Path, record: dict) -> None:
           record.get("description") or "", record.get("description_sha256") or "",
           str(evidence), now()))
     con.commit()
+
+
+# ---------------------------------------------------------------------------
+# Source: HasData Zillow search (optional, free key)
+# ---------------------------------------------------------------------------
+
+def normalize_hasdata(item: dict) -> dict[str, object]:
+    """Normalize one HasData Zillow listing row (defensive shape).
+
+    HasData rows carry zpid/url/price/beds/baths/area/address plus a
+    latLong-style coordinate pair in some shapes; every field is read with
+    a fallback and the raw row is kept as evidence.
+    """
+    zpid = str(item.get("zpid") or item.get("id") or "")
+    url = str(item.get("url") or (f"https://www.zillow.com/homedetails/{zpid}_zpid/" if zpid else ""))
+    addr = item.get("address")
+    if isinstance(addr, dict):
+        address = ", ".join(p for p in [str(addr.get("streetAddress") or ""),
+                                        str(addr.get("city") or ""),
+                                        f"{addr.get('state') or ''} {addr.get('zipcode') or ''}".strip()] if p)
+        city, state, zip_code = (str(addr.get("city") or ""), str(addr.get("state") or ""),
+                                 str(addr.get("zipcode") or ""))
+    else:
+        address = str(addr or "")
+        city = str(item.get("city") or "")
+        state = str(item.get("state") or "")
+        zip_code = str(item.get("zipcode") or item.get("zip") or "")
+    lat = _num(item.get("latitude"))
+    lon = _num(item.get("longitude"))
+    latlong = item.get("latLong") if isinstance(item.get("latLong"), dict) else {}
+    if lat is None:
+        lat = _num(latlong.get("latitude"))
+    if lon is None:
+        lon = _num(latlong.get("longitude"))
+    rent = _num(item.get("unformattedPrice") if item.get("unformattedPrice") is not None else item.get("price"))
+    beds = _num(item.get("beds") if item.get("beds") is not None else item.get("bedrooms"))
+    baths = _num(item.get("baths") if item.get("baths") is not None else item.get("bathrooms"))
+    sqft = _num(item.get("area") if item.get("area") is not None else item.get("livingArea"))
+    dom = item.get("daysOnZillow")
+    description = clean_text(". ".join(p for p in [
+        address, f"${rent:,.0f}/mo" if rent else "",
+        f"{beds:g} bed" if beds is not None else "",
+        f"{baths:g} bath" if baths is not None else "",
+        f"{sqft:,.0f} sqft" if sqft else "",
+        str(item.get("homeType") or ""), str(item.get("description") or "")] if p))
+    return {
+        "key": url or f"hasdata:{zpid}",
+        "url": url,
+        "source": "hasdata-zillow",
+        "external_id": zpid,
+        "title": address or "Untitled listing",
+        "address": address,
+        "city": city,
+        "state": state,
+        "zip": zip_code,
+        "rent": rent,
+        "beds": beds,
+        "baths": baths,
+        "sqft": sqft,
+        "property_type": str(item.get("homeType") or ""),
+        "status": str(item.get("status") or item.get("statusType") or ""),
+        "listed_date": "",
+        "days_on_market": dom if isinstance(dom, (int, float)) else None,
+        "latitude": lat,
+        "longitude": lon,
+        "description": description,
+        "description_sha256": hashlib.sha256(description.encode()).hexdigest(),
+        "evidence_text": json.dumps(item, indent=2),
+        "evidence_suffix": ".json",
+    }
+
+
+def hasdata_listings(api_key: str, query: dict[str, object], limit: int = 41,
+                     timeout: int = 60) -> list[dict[str, object]]:
+    """Search Zillow for-rent listings through HasData's scraper API.
+
+    GET https://api.hasdata.com/scrape/zillow/listing with an x-api-key
+    header. Free plan: 1,000 credits/month (a search call costs credits per
+    row returned), no card. One page per sync, like every other source.
+    Skipped upstream when no HASDATA_API_KEY is configured.
+    """
+    if not api_key:
+        return []
+    params: dict[str, object] = {"type": str(query.get("type") or "forRent")}
+    keyword = str(query.get("keyword") or "").strip()
+    if not keyword:
+        keyword = ", ".join(p for p in [str(query.get("city") or ""), str(query.get("state") or "")] if p)
+    if keyword:
+        params["keyword"] = keyword
+    for src_key, dst_key in (("min_beds", "beds_min_"), ("max_rent", "price_max_"),
+                             ("min_baths", "baths_min_")):
+        if query.get(src_key) not in (None, ""):
+            params[dst_key] = query[src_key]
+    url = "https://api.hasdata.com/scrape/zillow/listing?" + urllib.parse.urlencode(params)
+    data = fetch_json(url, timeout=timeout, headers={"x-api-key": api_key})
+    rows: list = []
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("listings", "results", "properties", "data"):
+            if isinstance(data.get(key), list):
+                rows = data[key]
+                break
+    return [normalize_hasdata(it) for it in rows[:limit] if isinstance(it, dict)]
+
+
+# ---------------------------------------------------------------------------
+# Enrichment providers (v0.2) — all optional; a missing key or coordinate
+# skips that provider with a note, never a crash and never a fake value.
+# ---------------------------------------------------------------------------
+
+ENRICH_PROVIDERS = ("walkscore", "rentcast-avm", "hud-fmr", "census-acs", "fema-flood", "airnow")
+
+
+def walkscore_scores(api_key: str, lat: float | None, lon: float | None,
+                     address: str, timeout: int = 25) -> dict:
+    """Walk/Transit/Bike scores from api.walkscore.com (free 5,000 calls/day)."""
+    if not api_key:
+        raise FetchBlocked("walkscore: no WALKSCORE_API_KEY configured")
+    params = {"format": "json", "transit": 1, "bike": 1, "wsapikey": api_key,
+              "address": address}
+    if lat is not None and lon is not None:
+        params["lat"] = lat
+        params["lon"] = lon
+    data = fetch_json("https://api.walkscore.com/score?" + urllib.parse.urlencode(params), timeout=timeout)
+    if not isinstance(data, dict) or data.get("status") != 1:
+        raise FetchBlocked(f"walkscore: status {data.get('status') if isinstance(data, dict) else '?'}")
+    out = {"walk_score": _num(data.get("walkscore")), "raw": data}
+    transit = data.get("transit") if isinstance(data.get("transit"), dict) else {}
+    bike = data.get("bike") if isinstance(data.get("bike"), dict) else {}
+    out["transit_score"] = _num(transit.get("score"))
+    out["bike_score"] = _num(bike.get("score"))
+    return out
+
+
+def rentcast_avm(api_key: str, listing: dict, timeout: int = 25) -> dict:
+    """Market rent estimate from RentCast AVM (same key as the listings API)."""
+    if not api_key:
+        raise FetchBlocked("rentcast-avm: no RENTCAST_API_KEY configured")
+    address = str(listing.get("address") or "")
+    if not address:
+        raise FetchBlocked("rentcast-avm: listing has no address")
+    params: dict[str, object] = {"address": address}
+    for src, dst in (("beds", "bedrooms"), ("baths", "bathrooms"),
+                     ("sqft", "squareFootage"), ("property_type", "propertyType")):
+        if listing.get(src) not in (None, ""):
+            params[dst] = listing[src]
+    url = "https://api.rentcast.io/v1/avm/rent/long-term?" + urllib.parse.urlencode(params)
+    data = fetch_json(url, timeout=timeout, headers={"X-Api-Key": api_key})
+    if not isinstance(data, dict) or data.get("rent") is None:
+        raise FetchBlocked("rentcast-avm: no estimate returned")
+    return {"rent_estimate": _num(data.get("rent")),
+            "rent_range_low": _num(data.get("rentRangeLow")),
+            "rent_range_high": _num(data.get("rentRangeHigh")), "raw": data}
+
+
+_HUD_BED_LABELS = {0: "Efficiency", 1: "One-Bedroom", 2: "Two-Bedroom",
+                   3: "Three-Bedroom", 4: "Four-Bedroom"}
+
+
+def hud_fmr(token: str, zip_code: str, beds: float | None, timeout: int = 25) -> dict:
+    """HUD Fair Market Rent for a ZIP (free HUD API token required).
+
+    Parses defensively: HUD's payload shape varies by year and by whether
+    the ZIP is a small-area FMR ZIP, so bedroom figures are searched in the
+    returned records rather than assumed at one fixed path.
+    """
+    if not token:
+        raise FetchBlocked("hud-fmr: no HUD_API_TOKEN configured (free at huduser.gov)")
+    if not zip_code:
+        raise FetchBlocked("hud-fmr: listing has no ZIP")
+    url = f"https://www.huduser.gov/hudapi/public/fmr/data/{zip_code}"
+    data = fetch_json(url, timeout=timeout, headers={"Authorization": f"Bearer {token}"})
+    label = _HUD_BED_LABELS.get(int(beds) if beds is not None else 2, "Two-Bedroom")
+    found: dict[str, object] = {"raw": data}
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == label and isinstance(value, (int, float)):
+                    found["fmr_rent"] = float(value)
+                if key.lower().replace(" ", "").replace("-", "") == label.lower().replace("-", "") and isinstance(value, (int, float)):
+                    found["fmr_rent"] = float(value)
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    if "fmr_rent" not in found:
+        raise FetchBlocked(f"hud-fmr: no {label} figure found in response for ZIP {zip_code}")
+    found["bedroom_label"] = label
+    return found
+
+
+def census_acs(lat: float | None, lon: float | None, timeout: int = 25) -> dict:
+    """Neighborhood medians from the Census ACS (keyless).
+
+    Geocoder (keyless) resolves coordinates to a census tract, then ACS
+    5-year variables: B25064 median gross rent, B19013 median household
+    income. Figures describe the tract, not the property.
+    """
+    if lat is None or lon is None:
+        raise FetchBlocked("census-acs: listing has no coordinates")
+    geo_url = ("https://geocoding.geo.census.gov/geocoder/geographies/coordinates?"
+               + urllib.parse.urlencode({"x": lon, "y": lat, "benchmark": "Public_AR_Current",
+                                         "vintage": "Current_Current", "format": "json"}))
+    geo = fetch_json(geo_url, timeout=timeout)
+    tracts = (((geo.get("result") or {}).get("geographies") or {}).get("Census Tracts") or []) if isinstance(geo, dict) else []
+    if not tracts:
+        raise FetchBlocked("census-acs: geocoder found no tract for these coordinates")
+    tract = tracts[0]
+    state, county, tract_code = str(tract.get("STATE") or ""), str(tract.get("COUNTY") or ""), str(tract.get("TRACT") or "")
+    acs_url = ("https://api.census.gov/data/2023/acs/acs5?get=B25064_001E,B19013_001E"
+               f"&for=tract:{tract_code}&in=state:{state}&in=county:{county}")
+    rows = fetch_json(acs_url, timeout=timeout)
+    if not isinstance(rows, list) or len(rows) < 2:
+        raise FetchBlocked("census-acs: no ACS row for this tract")
+    header, values = rows[0], rows[1]
+    out = {"tract_geoid": str(tract.get("GEOID") or ""), "raw": rows}
+    for var, name in (("B25064_001E", "tract_median_gross_rent"), ("B19013_001E", "tract_median_household_income")):
+        if var in header:
+            value = _num(values[header.index(var)])
+            if value is not None and value >= 0:
+                out[name] = value
+    return out
+
+
+def fema_flood(lat: float | None, lon: float | None, timeout: int = 25) -> dict:
+    """Flood zone from FEMA's NFHL map service (keyless ArcGIS REST)."""
+    if lat is None or lon is None:
+        raise FetchBlocked("fema-flood: listing has no coordinates")
+    params = {"geometry": f"{lon},{lat}", "geometryType": "esriGeometryPoint",
+              "inSR": 4326, "spatialRel": "esriSpatialRelIntersects",
+              "outFields": "FLD_ZONE,ZONE_SUBTY", "returnGeometry": "false", "f": "json"}
+    url = ("https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?"
+           + urllib.parse.urlencode(params))
+    data = fetch_json(url, timeout=timeout)
+    features = data.get("features") if isinstance(data, dict) else None
+    if not features:
+        return {"flood_zone": "X (unmapped)", "raw": data}
+    attrs = features[0].get("attributes") or {}
+    zone = str(attrs.get("FLD_ZONE") or "").strip()
+    subty = str(attrs.get("ZONE_SUBTY") or "").strip()
+    return {"flood_zone": f"{zone} ({subty})" if zone and subty else (zone or "unknown"), "raw": data}
+
+
+def airnow_aqi(api_key: str, lat: float | None, lon: float | None, timeout: int = 25) -> dict:
+    """Current air quality (max AQI + category) from AirNow (free key)."""
+    if not api_key:
+        raise FetchBlocked("airnow: no AIRNOW_API_KEY configured")
+    if lat is None or lon is None:
+        raise FetchBlocked("airnow: listing has no coordinates")
+    from datetime import date
+    params = {"format": "application/json", "latitude": lat, "longitude": lon,
+              "date": date.today().isoformat(), "distance": 25, "API_KEY": api_key}
+    data = fetch_json("https://www.airnowapi.org/aq/observation/latLong/current/?"
+                      + urllib.parse.urlencode(params), timeout=timeout)
+    if not isinstance(data, list) or not data:
+        raise FetchBlocked("airnow: no observations near these coordinates")
+    worst = max(data, key=lambda obs: obs.get("AQI", 0) if isinstance(obs, dict) else 0)
+    category = worst.get("Category") if isinstance(worst.get("Category"), dict) else {}
+    return {"aqi": worst.get("AQI"), "aqi_category": str(category.get("Name") or ""),
+            "aqi_parameter": str(worst.get("ParameterName") or ""), "raw": data}
+
+
+def store_enrichment(con: sqlite3.Connection, key: str, provider: str, payload: dict) -> None:
+    con.execute("""
+      INSERT INTO enrichment (listing_key, provider, payload, fetched_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(listing_key, provider) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at
+    """, (key, provider, json.dumps(payload), now()))
+    updates = {col: payload[col] for col in
+               ("walk_score", "transit_score", "bike_score", "rent_estimate", "fmr_rent", "flood_zone")
+               if payload.get(col) is not None}
+    if updates:
+        sets = ", ".join(f"{col}=?" for col in updates)
+        con.execute(f"UPDATE listings SET {sets} WHERE key=?", (*updates.values(), key))
+    con.commit()
+
+
+def enrich_listing(con: sqlite3.Connection, listing: dict, providers: list[str],
+                   keys: dict[str, str], force: bool = False) -> list[str]:
+    """Run the chosen providers for one listing; returns human-readable notes."""
+    notes: list[str] = []
+    key = str(listing["key"])
+    existing = set()
+    if not force:
+        existing = {r[0] for r in con.execute(
+            "SELECT provider FROM enrichment WHERE listing_key = ?", (key,))}
+    lat, lon = listing.get("latitude"), listing.get("longitude")
+    for provider in providers:
+        if provider in existing:
+            notes.append(f"{provider}: already enriched (use --force to refresh)")
+            continue
+        try:
+            if provider == "walkscore":
+                payload = walkscore_scores(keys.get("walkscore", ""), lat, lon, str(listing.get("address") or ""))
+            elif provider == "rentcast-avm":
+                payload = rentcast_avm(keys.get("rentcast", ""), listing)
+            elif provider == "hud-fmr":
+                payload = hud_fmr(keys.get("hud", ""), str(listing.get("zip") or ""), listing.get("beds"))
+            elif provider == "census-acs":
+                payload = census_acs(lat, lon)
+            elif provider == "fema-flood":
+                payload = fema_flood(lat, lon)
+            elif provider == "airnow":
+                payload = airnow_aqi(keys.get("airnow", ""), lat, lon)
+            else:
+                notes.append(f"{provider}: unknown provider, skipped")
+                continue
+        except FetchBlocked as exc:
+            notes.append(str(exc))
+            continue
+        store_enrichment(con, key, provider, payload)
+        notes.append(f"{provider}: ok")
+    return notes
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +939,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     continue
                 records = realty_us_listings(key, source.get("query") or {}, limit=limit)
                 print(f"{name}: realty-us -> {len(records)} listings")
+            elif kind == "hasdata-zillow":
+                key = api_key_for(str(source.get("api_key_env") or "HASDATA_API_KEY"))
+                if not key:
+                    notes.append(f"{name}: skipped, no HASDATA_API_KEY configured "
+                                 f"(free key at hasdata.com, 1,000 credits/month)")
+                    continue
+                records = hasdata_listings(key, source.get("query") or {}, limit=limit)
+                print(f"{name}: hasdata-zillow -> {len(records)} listings")
             else:
                 if kind:
                     raise SystemExit(f"source {name}: unknown kind '{kind}'")
@@ -695,6 +1031,8 @@ def cmd_listings(args: argparse.Namespace) -> int:
                 f"{row['beds']:g}bd" if row["beds"] is not None else "?bd",
                 f"{row['baths']:g}ba" if row["baths"] is not None else "?ba",
                 f"{row['sqft']:,.0f}sqft" if row["sqft"] else "?sqft",
+                f"walk {row['walk_score']:g}" if "walk_score" in row.keys() and row["walk_score"] is not None else "",
+                (f"est {fmt_money(row['rent_estimate'])}" if "rent_estimate" in row.keys() and row["rent_estimate"] else ""),
                 row["city"] or "", row["source"],
                 f"[{row['track_state']}]" if row["track_state"] else ""]
         print(f"- {row['title']} | " + " | ".join(b for b in bits if b))
@@ -764,6 +1102,39 @@ def cmd_check_duplicate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_enrich(args: argparse.Namespace) -> int:
+    cfg_path = Path(args.config).resolve()
+    cfg = load_config(cfg_path)
+    root = data_root(cfg, cfg_path)
+    con = database(root)
+    enrich_cfg = cfg.get("enrichment") if isinstance(cfg.get("enrichment"), dict) else {}
+    providers = args.provider or enrich_cfg.get("providers") or list(ENRICH_PROVIDERS)
+    providers = [str(p) for p in providers]
+    keys = {
+        "walkscore": api_key_for("WALKSCORE_API_KEY"),
+        "rentcast": api_key_for("RENTCAST_API_KEY"),
+        "hud": api_key_for("HUD_API_TOKEN"),
+        "airnow": api_key_for("AIRNOW_API_KEY"),
+    }
+    if args.key:
+        rows = [dict(r) for r in con.execute("SELECT * FROM listings WHERE key = ?", (args.key,))]
+        if not rows:
+            raise SystemExit(f"listing not in the local ledger: {args.key}")
+    else:
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM listings ORDER BY last_checked DESC LIMIT ?", (args.limit,))]
+    done = 0
+    for listing in rows:
+        notes = enrich_listing(con, listing, providers, keys, force=args.force)
+        ok = sum(1 for n in notes if n.endswith(": ok"))
+        if ok:
+            done += 1
+        print(f"- {listing['title']}: " + "; ".join(notes))
+    con.close()
+    print(f"enrich complete: {done} of {len(rows)} listings gained new data")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     con, _ = with_db(args)
     total = con.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
@@ -781,6 +1152,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     if stats[3]:
         print(f"rent range (priced listings): {fmt_money(stats[0])} - {fmt_money(stats[2])}, "
               f"avg {fmt_money(stats[1])} across {stats[3]} listings")
+    enriched = con.execute("SELECT COUNT(DISTINCT listing_key) FROM enrichment").fetchone()[0]
+    if enriched:
+        print(f"enriched listings: {enriched} (run the ranker to use walk scores and rent estimates)")
     con.close()
     return 0
 
@@ -828,6 +1202,14 @@ def parser() -> argparse.ArgumentParser:
     dup.add_argument("key")
     dup.add_argument("--address")
     dup.set_defaults(func=cmd_check_duplicate)
+
+    enrich = sub.add_parser("enrich", help="add Walk Score / rent estimate / HUD / Census / flood / air data to captured listings")
+    enrich.add_argument("--key", help="only this listing key (default: all, newest first)")
+    enrich.add_argument("--limit", type=int, default=25)
+    enrich.add_argument("--provider", action="append", choices=ENRICH_PROVIDERS,
+                        help="repeatable; default is the config's enrichment.providers list")
+    enrich.add_argument("--force", action="store_true", help="re-fetch providers already recorded")
+    enrich.set_defaults(func=cmd_enrich)
 
     report = sub.add_parser("report", help="ledger summary")
     report.set_defaults(func=cmd_report)

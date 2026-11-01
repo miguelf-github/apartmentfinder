@@ -51,5 +51,9 @@
   },
   "must_have": [],
   "must_have_strict": false,
-  "nice_to_have": []
+  "nice_to_have": [],
+  "location_quality": {
+    "_note": "min_walk_score is a HARD constraint when set and the listing has been enriched with a Walk Score (apartmentfinder.py enrich). Unknown scores never exclude.",
+    "min_walk_score": null
+  }
 }

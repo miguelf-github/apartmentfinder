@@ -23,10 +23,32 @@
       }
     },
     {
+      "_comment": "Optional Zillow source via HasData (real Zillow for-rent search, no bot-wall fights). Free key at hasdata.com: 1,000 credits/month, no card. Skipped when no HASDATA_API_KEY is set.",
+      "api_key_env": "HASDATA_API_KEY",
+      "kind": "hasdata-zillow",
+      "limit": 41,
+      "name": "hasdata-zillow",
+      "query": {
+        "keyword": "Springfield, IL",
+        "type": "forRent"
+      }
+    },
+    {
       "_comment": "Direct listing URLs you paste in (Zillow, Apartments.com, Redfin, a landlord page). The importer retains only each URL. Portals often bot-wall automated fetches; a blocked page is recorded as unmeasurable, never as 'gone'.",
       "name": "manual-urls",
       "url_list_file": "listing-urls.jsonl",
       "urls": []
     }
-  ]
+  ],
+  "enrichment": {
+    "_comment": "Providers run by `apartmentfinder.py enrich`. All optional: census-acs and fema-flood are keyless; walkscore (WALKSCORE_API_KEY), rentcast-avm (RENTCAST_API_KEY), hud-fmr (HUD_API_TOKEN) and airnow (AIRNOW_API_KEY) use free keys from ~/.config/apartmentfinder.env. Missing key or coordinates = skipped with a note.",
+    "providers": [
+      "walkscore",
+      "rentcast-avm",
+      "hud-fmr",
+      "census-acs",
+      "fema-flood",
+      "airnow"
+    ]
+  }
 }

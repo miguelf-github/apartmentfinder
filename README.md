@@ -27,6 +27,8 @@ It deliberately does **not** contact landlords or property managers, submit appl
 ## What it does
 
 - Pulls active long-term rental listings from the **RentCast API** (`/listings/rental/long-term`) — one call per saved location per sync, because the free Developer plan is 50 calls/month. Optionally pulls Realtor.com data via the RapidAPI Realty-in-US source.
+- Optionally searches **Zillow directly through HasData** (free key, 1,000 credits/month), which returns structured for-rent records instead of fighting Zillow's bot wall.
+- **Enriches any captured listing** (`apartmentfinder.py enrich`) with Walk/Transit/Bike scores, a RentCast market-rent estimate, HUD Fair Market Rent for its ZIP, census-tract median rent and income, FEMA flood zone, and current air quality. Every provider is optional and off until you add its free key; the Census and FEMA providers need no key at all. See `CHANGELOG.md` for the 0.2 details.
 - Imports direct listing URLs you paste in (Zillow, Apartments.com, Redfin, a landlord's own page) and keeps only each URL from JSON/JSONL exports, exactly like hiddenjob's importer. Portal pages often bot-wall automated fetches (Zillow uses PerimeterX); those are logged as unmeasurable notes, not treated as delisted.
 - Saves every listing's raw source record as local evidence (SHA-256 named files) with capture time, so a listing that disappears still has its rent/terms on record.
 - Keeps a local tracking ledger: `interested`, `contacted`, `tour_scheduled`, `toured`, `applied`, `waitlisted`, `leased`, `passed`, `unavailable`, `closed`.
@@ -45,6 +47,7 @@ python3 apartmentfinder.py sync --limit 50
 python3 apartmentfinder.py listings --max-rent 2500 --min-beds 2
 python3 tools/apartmentfinder_rank.py
 python3 apartmentfinder.py stage 'rentcast:12345' --note 'Quiet street, in-unit laundry'
+python3 apartmentfinder.py enrich --limit 25        # optional APIs: walk scores, rent estimate, HUD, Census, flood, air
 python3 apartmentfinder.py track 'rentcast:12345' tour_scheduled --tour-at '2026-11-08 14:00' --contact 'Ana, property manager'
 python3 apartmentfinder.py report
 ```
@@ -60,6 +63,8 @@ python3 -m unittest discover -s tests -v
 ## Why not a Zillow/Apartments.com API?
 
 There isn't one for the public: Zillow retired its public API (its remaining Bridge program needs MLS/broker affiliation), and Apartments.com publishes no developer API at all. RentCast is the self-serve route — it aggregates MLS and public listing sources nationwide and has a real free tier. The direct-URL importer plus the home-search browser flow covers anything RentCast misses.
+
+All optional keys (RentCast, HasData, Walk Score, HUD, AirNow) live in the same place: the environment or `~/.config/apartmentfinder.env` (chmod 600), one `NAME=value` per line. Copy a source or provider in from the example config, add its key, and it turns on at the next sync/enrich — remove the key and it skips itself again. Nothing is ever required beyond the core tool.
 
 ## Evidence states
 
