@@ -1,0 +1,32 @@
+{
+  "data_dir": ".apartmentfinder",
+  "preferences_file": "preferences.json",
+  "sources": [
+    {
+      "_comment": "Primary source. One API call per location in preferences.json per sync. Free Developer plan = 50 calls/month, so sync deliberately, not on a tight cron. Get a key at rentcast.io/api. Key lives in env or ~/.config/apartmentfinder.env, never in this file.",
+      "api_key_env": "RENTCAST_API_KEY",
+      "from_preferences": true,
+      "kind": "rentcast",
+      "limit": 50,
+      "name": "rentcast",
+      "_fixed_query_alternative": "Or replace from_preferences with \"query\": {\"zipCode\": \"62701\", \"state\": \"IL\"} for one fixed search."
+    },
+    {
+      "_comment": "Optional second source: Realtor.com data via RapidAPI (apidojo Realty in US, ~500 free requests/month). Skipped when no RAPIDAPI_KEY is set.",
+      "api_key_env": "RAPIDAPI_KEY",
+      "kind": "realty-us",
+      "limit": 42,
+      "name": "realty-us",
+      "query": {
+        "city": "Springfield",
+        "state": "IL"
+      }
+    },
+    {
+      "_comment": "Direct listing URLs you paste in (Zillow, Apartments.com, Redfin, a landlord page). The importer retains only each URL. Portals often bot-wall automated fetches; a blocked page is recorded as unmeasurable, never as 'gone'.",
+      "name": "manual-urls",
+      "url_list_file": "listing-urls.jsonl",
+      "urls": []
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "_comment": "Renter profile used ONLY to prefill inquiry/application details for your own review. apartmentfinder never sends it anywhere. Keep the real file gitignored.",
+  "credit_score_range": "",
+  "current_location": "City, State",
+  "email": "you@example.com",
+  "full_name": "Your Name",
+  "monthly_income_note": "",
+  "move_in_target": "YYYY-MM-DD",
+  "occupants": 1,
+  "phone": "+1-555-555-0100",
+  "rental_history_note": ""
+}

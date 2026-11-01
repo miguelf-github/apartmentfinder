@@ -1,0 +1,9 @@
+# Private local data — never commit (hiddenjob pattern)
+.apartmentfinder/
+config/targets.json
+config/preferences.json
+config/profile.json
+config/automation.json
+config/listing-urls.jsonl
+*.sqlite3
+__pycache__/

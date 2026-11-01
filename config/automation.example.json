@@ -1,0 +1,27 @@
+{
+  "always_human_only": [
+    "create_or_log_into_accounts",
+    "enter_passwords_or_one_time_codes",
+    "solve_captchas",
+    "send_email_or_messages_to_landlords",
+    "submit_rental_applications",
+    "pay_application_fees_deposits_or_rent",
+    "sign_leases_or_accept_terms",
+    "share_credit_reports_income_documents_or_id"
+  ],
+  "mode": "hands_off_with_final_approval",
+  "outreach": {
+    "_note": "Any message to a landlord/property manager, tour booking, or application is shown to the user first and sent only by the user (or after explicit approval where a channel supports it).",
+    "confirmation_required": true,
+    "requires_final_user_approval": true
+  },
+  "routine_work": [
+    "read_local_workspace",
+    "discover_listings",
+    "capture_source_evidence",
+    "rank_against_preferences_and_constraints",
+    "stage_qualified_listings_as_interested",
+    "track_tour_and_application_outcomes",
+    "prepare_follow_up_reminders"
+  ]
+}
