@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-11-03
+
+- RentCast now also works with a **credential connected in Muse** (Secure Vault, `custom.rentcast`), not just a raw key in the environment or secrets file — the same vault-fallback pattern hiddenjob uses for JSearch. Sync and the `rentcast-avm` enrichment try the raw key first, then the connector CLI at `~/workspace/custom-connectors/custom.rentcast/bin/rentcast_api.py`. Nothing about the ledger or config changes; connect the key in Muse and the next sync picks it up.
+- The connector CLI surfaces the provider's own error body, so a rejected call explains itself (for example `billing/subscription-inactive`, which means the key is valid but the RentCast account has no active API plan — subscribe the free Developer plan on the API dashboard; do not create a new key).
+- 35 tests (3 new for the connector fallback).
+
 ## 0.2.0 — 2026-11-01
 
 **The option layer: every API beyond the core sources is wired in, optional, and off until you add a free key.**

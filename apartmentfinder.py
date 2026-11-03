@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -29,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 UA = "Apartmentfinder/0.2 (research-and-review)"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -216,6 +217,76 @@ def rentcast_listings(api_key: str, query: dict[str, object], limit: int = 50,
     data = fetch_json(url, timeout=timeout, headers={"X-Api-Key": api_key})
     items = data if isinstance(data, list) else []
     return [normalize_rentcast(it) for it in items if isinstance(it, dict)]
+
+
+RENTCAST_CLI = os.path.expanduser("~/workspace/custom-connectors/custom.rentcast/bin/rentcast_api.py")
+
+
+def _rentcast_cli(args: list[str], timeout: int = 90) -> object:
+    """Run the custom.rentcast connector CLI; returns parsed JSON or None.
+
+    The CLI calls RentCast with the Secure Vault credential (surrogate
+    exchange), so no raw key exists in this process. A {"error": ...}
+    payload is printed to stderr and reported as None.
+    """
+    if not os.path.exists(RENTCAST_CLI):
+        return None
+    try:
+        proc = subprocess.run([sys.executable, RENTCAST_CLI, *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"rentcast connector CLI: {exc}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"rentcast connector CLI failed: {proc.stdout.strip()[:200]}", file=sys.stderr)
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        print("rentcast connector CLI: unparseable output", file=sys.stderr)
+        return None
+    if isinstance(data, dict) and data.get("error"):
+        print(f"rentcast connector: {data['error']}", file=sys.stderr)
+        return None
+    return data
+
+
+def rentcast_listings_via_connector(query: dict[str, object], limit: int = 50) -> list[dict[str, object]]:
+    """Fetch RentCast listings via the stored Muse credential (no raw key).
+
+    Fallback used when no RENTCAST_API_KEY is in the env/secrets file but
+    the user connected RentCast in Muse (custom.rentcast). Same pattern
+    as hiddenjob's JSearch vault fallback.
+    """
+    args = ["listings", "--limit", str(max(1, min(limit, 500)))]
+    for src, flag in (("city", "--city"), ("state", "--state"), ("zipCode", "--zip"),
+                      ("address", "--address"), ("latitude", "--latitude"),
+                      ("longitude", "--longitude"), ("radius", "--radius"),
+                      ("bedrooms", "--bedrooms"), ("bathrooms", "--bathrooms"),
+                      ("propertyType", "--property-type"), ("daysOld", "--days-old")):
+        if query.get(src) not in (None, ""):
+            args += [flag, str(query[src])]
+    data = _rentcast_cli(args)
+    items = data if isinstance(data, list) else []
+    return [normalize_rentcast(it) for it in items if isinstance(it, dict)]
+
+
+def rentcast_avm_via_connector(listing: dict) -> dict:
+    """RentCast AVM via the stored Muse credential. Raises FetchBlocked."""
+    address = str(listing.get("address") or "")
+    if not address:
+        raise FetchBlocked("rentcast-avm: listing has no address")
+    args = ["avm", "--address", address]
+    for src, flag in (("beds", "--bedrooms"), ("baths", "--bathrooms"),
+                      ("sqft", "--sqft"), ("property_type", "--property-type")):
+        if listing.get(src) not in (None, ""):
+            args += [flag, str(listing[src])]
+    data = _rentcast_cli(args)
+    if not isinstance(data, dict) or data.get("rent") is None:
+        raise FetchBlocked("rentcast-avm: connector returned no estimate")
+    return {"rent_estimate": _num(data.get("rent")),
+            "rent_range_low": _num(data.get("rentRangeLow")),
+            "rent_range_high": _num(data.get("rentRangeHigh")), "raw": data}
 
 
 # ---------------------------------------------------------------------------
@@ -673,9 +744,13 @@ def walkscore_scores(api_key: str, lat: float | None, lon: float | None,
 
 
 def rentcast_avm(api_key: str, listing: dict, timeout: int = 25) -> dict:
-    """Market rent estimate from RentCast AVM (same key as the listings API)."""
+    """Market rent estimate from RentCast AVM (same key as the listings API).
+
+    With no raw key, falls back to the stored Muse credential
+    (custom.rentcast connector), raising FetchBlocked if that fails too.
+    """
     if not api_key:
-        raise FetchBlocked("rentcast-avm: no RENTCAST_API_KEY configured")
+        return rentcast_avm_via_connector(listing)
     address = str(listing.get("address") or "")
     if not address:
         raise FetchBlocked("rentcast-avm: listing has no address")
@@ -919,19 +994,25 @@ def cmd_sync(args: argparse.Namespace) -> int:
         try:
             if kind == "rentcast":
                 key = api_key_for(str(source.get("api_key_env") or "RENTCAST_API_KEY"))
-                if not key:
-                    notes.append(f"{name}: skipped, no API key (set RENTCAST_API_KEY "
-                                 f"in env or ~/.config/apartmentfinder.env)")
-                    continue
                 queries = [source.get("query") or {}]
                 if source.get("from_preferences"):
                     queries = preference_queries(prefs) or queries
                 for q in queries:
                     if not isinstance(q, dict):
                         continue
-                    got = rentcast_listings(key, q, limit=limit)
+                    if key:
+                        got = rentcast_listings(key, q, limit=limit)
+                    else:
+                        # No raw key: use the credential connected in Muse
+                        # (custom.rentcast), if any. Empty result + a stderr
+                        # note when neither route is available.
+                        got = rentcast_listings_via_connector(q, limit=limit)
                     records.extend(got)
                     print(f"{name}: rentcast query {q} -> {len(got)} listings")
+                if not key and not records:
+                    notes.append(f"{name}: no raw RENTCAST_API_KEY and the Muse "
+                                 f"connector returned nothing (see stderr); add a key "
+                                 f"to ~/.config/apartmentfinder.env or connect RentCast in Muse")
             elif kind == "realty-us":
                 key = api_key_for(str(source.get("api_key_env") or "RAPIDAPI_KEY"))
                 if not key:

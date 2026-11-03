@@ -110,7 +110,8 @@ class ImportAndSyncTests(unittest.TestCase):
                 {"name": "rentcast", "kind": "rentcast"}]}))
             args = argparse.Namespace(config=str(config), limit=10)
             with mock.patch.dict("os.environ", {}, clear=True), \
-                 mock.patch.object(apartmentfinder, "_secret_from_file", return_value=""):
+                 mock.patch.object(apartmentfinder, "_secret_from_file", return_value=""), \
+                 mock.patch.object(apartmentfinder, "rentcast_listings_via_connector", return_value=[]):
                 self.assertEqual(apartmentfinder.cmd_sync(args), 0)
             con = sqlite3.connect(root / "ledger" / "apartmentfinder.sqlite3")
             self.assertEqual(con.execute("SELECT COUNT(*) FROM listings").fetchone()[0], 0)
@@ -188,6 +189,42 @@ class RankerGateTests(unittest.TestCase):
         self.assertEqual(ranker.classify(self.listing(), prefs)["tier"], "excluded")
         prefs_soft = dict(self.PREFS, must_have=["garage"], must_have_strict=False)
         self.assertNotEqual(ranker.classify(self.listing(), prefs_soft)["tier"], "excluded")
+
+
+class ConnectorFallbackTests(unittest.TestCase):
+    """The custom.rentcast vault fallback (hiddenjob's JSearch pattern)."""
+
+    def _run(self, stdout):
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.stdout = stdout
+        return proc
+
+    def test_listings_via_connector(self):
+        payload = json.dumps([{"id": "c1", "formattedAddress": "4 Birch Ln, Springfield, IL 62701",
+                                "price": 1750, "bedrooms": 2}])
+        with mock.patch.object(apartmentfinder, "RENTCAST_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run", return_value=self._run(payload)) as run:
+            records = apartmentfinder.rentcast_listings_via_connector({"city": "Springfield", "state": "IL"}, limit=5)
+        argv = run.call_args[0][0]
+        self.assertIn("listings", argv)
+        self.assertIn("--city", argv)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["rent"], 1750.0)
+
+    def test_connector_error_returns_empty(self):
+        with mock.patch.object(apartmentfinder, "RENTCAST_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run",
+                               return_value=self._run('{"error": "HTTP 403: subscription-inactive"}')):
+            self.assertEqual(apartmentfinder.rentcast_listings_via_connector({"city": "X"}), [])
+
+    def test_avm_falls_back_to_connector(self):
+        listing = {"address": "4 Birch Ln, Springfield, IL 62701", "beds": 2.0}
+        with mock.patch.object(apartmentfinder, "RENTCAST_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run",
+                               return_value=self._run('{"rent": 1825, "rentRangeLow": 1700, "rentRangeHigh": 1950}')):
+            out = apartmentfinder.rentcast_avm("", listing)
+        self.assertEqual(out["rent_estimate"], 1825.0)
 
 
 class HasDataTests(unittest.TestCase):
