@@ -1,6 +1,6 @@
 {
   "_comment": "Your search preferences and constraints. Hard constraints exclude a listing outright in the ranker; soft preferences only change its score. Leave a field null/empty to leave it unconstrained. This file is private (gitignored once copied to preferences.json).",
-  "_commute_note": "Kept for tour-day planning and manual checks; the ranker does not fabricate drive times.",
+  "_commute_note": "For each target with an address, the ranker geocodes it (Census geocoder) and shows an OSRM driving estimate per listing: road-network time with no live traffic. max_minutes only flags the estimate when set; it never excludes.",
   "_deal_breakers_note": "Keywords that exclude a listing outright when present in its text, e.g. ['no pets', '55+', 'income 3x rent', 'no parking']. If you have pets, add 'no pets' here too.",
   "_must_have_note": "Keywords matched against the listing text, e.g. ['in-unit laundry', 'parking', 'dishwasher', 'ac']. When must_have_strict is true, a listing missing one is excluded; otherwise it just loses points.",
   "_nice_to_have_note": "Keywords that add score when present, e.g. ['yard', 'garage', 'second bathroom', 'near caltrain'].",

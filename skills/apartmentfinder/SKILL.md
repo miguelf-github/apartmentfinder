@@ -13,7 +13,7 @@ Mirror of hiddenjob for housing: discover listings a person might miss, preserve
 
 ## Required workflow
 
-1. Initialize private local configuration: `python3 apartmentfinder.py init`, then edit `config/preferences.json` (locations, budget, layout, must-haves, deal-breakers, household) and copy the automation/profile examples to their ignored real files. Keep all real config, evidence, and the ledger out of Git.
+1. Initialize private local configuration: `python3 apartmentfinder.py init`, then edit `config/preferences.json` (locations, budget, layout, must-haves, deal-breakers, household, and commute_targets: a work address earns every ranked listing an OSRM driving estimate, no live traffic) and copy the automation/profile examples to their ignored real files. Keep all real config, evidence, and the ledger out of Git.
 2. API key: RentCast key goes in the environment or `~/.config/apartmentfinder.env` (chmod 600) as `RENTCAST_API_KEY`. Never in the repo, never in chat. Without a key the rentcast source is skipped with a note — that is a setup gap, not an empty market.
 3. Respect the API budget: RentCast's free Developer plan is 50 requests/month and sync spends one request per saved location. Sync deliberately (a few times a week at most on the free plan), not on a tight cron.
 4. Run `python3 apartmentfinder.py sync --limit 50`, inspect with `python3 apartmentfinder.py listings`, and rank with `python3 tools/apartmentfinder_rank.py`. Open the saved evidence copy before staging a listing as `interested`.

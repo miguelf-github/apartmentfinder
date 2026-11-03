@@ -337,6 +337,35 @@ class HasDataTests(unittest.TestCase):
         self.assertEqual(records[0]["source"], "hasdata-zillow")
 
 
+class CommutePrimitiveTests(unittest.TestCase):
+    def test_geocode_address_parses_match(self):
+        payload = {"result": {"addressMatches": [
+            {"coordinates": {"x": -122.0324, "y": 37.6013}}]}}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            lat, lon = apartmentfinder.geocode_address(
+                "1 Main St, Springfield, IL 62701")
+        self.assertEqual((lat, lon), (37.6013, -122.0324))
+
+    def test_geocode_address_no_match_raises(self):
+        with mock.patch.object(apartmentfinder, "fetch_json",
+                               return_value={"result": {"addressMatches": []}}):
+            with self.assertRaises(apartmentfinder.FetchBlocked):
+                apartmentfinder.geocode_address("1 Nowhere Ln")
+
+    def test_osrm_drive_converts_units(self):
+        payload = {"code": "Ok", "routes": [{"duration": 1500.0, "distance": 22209.0}]}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
+            out = apartmentfinder.osrm_drive(37.4625, -122.1482, 37.6013, -122.0324)
+        self.assertAlmostEqual(out["minutes"], 25.0)
+        self.assertAlmostEqual(out["miles"], 13.8, places=1)
+
+    def test_osrm_drive_no_route_raises(self):
+        with mock.patch.object(apartmentfinder, "fetch_json",
+                               return_value={"code": "NoRoute", "routes": []}):
+            with self.assertRaises(apartmentfinder.FetchBlocked):
+                apartmentfinder.osrm_drive(0.0, 0.0, 1.0, 1.0)
+
+
 class EnrichmentProviderTests(unittest.TestCase):
     def test_walkscore_parse(self):
         payload = {"status": 1, "walkscore": 82, "transit": {"score": 55}, "bike": {"score": 70}}

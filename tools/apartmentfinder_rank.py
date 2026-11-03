@@ -10,6 +10,11 @@ Mirrors tools/hiddenjob_rank.py: a gate layer and a score layer.
   override a bad gate instead of never seeing the place.
 - Score (soft preferences): rent headroom under target, space value
   ($/sqft), layout fit, freshness, and nice-to-have keyword hits.
+- Commute (when preferences set commute_targets with an address): each
+  printed listing gets a driving estimate to each target, geocoded with
+  the Census geocoder and routed with OSRM. It is a road-network
+  estimate with no live traffic, shown for comparison and flagged when
+  over the target's max_minutes; it never excludes a listing.
 
 A missing fact never excludes: a listing with unknown beds is not punished
 for a min-beds gate it might pass; it is scored on what is known and the
@@ -193,6 +198,19 @@ def main() -> int:
         ranked.append((result, row))
     ranked.sort(key=lambda pair: (-pair[0]["score"], pair[1].get("rent") or 1e18))
 
+    targets = []
+    for t in prefs.get("commute_targets") or []:
+        if not isinstance(t, dict) or not str(t.get("address") or "").strip():
+            continue
+        try:
+            t_lat, t_lon = apartmentfinder.geocode_address(str(t["address"]))
+        except apartmentfinder.FetchBlocked as exc:
+            print(f"commute: {exc}; target skipped", file=sys.stderr)
+            continue
+        targets.append({"label": str(t.get("label") or t["address"]), "lat": t_lat,
+                        "lon": t_lon, "max_minutes": t.get("max_minutes")})
+    commute_cache: dict = {}
+
     for result, row in ranked[: args.limit]:
         rent = f"${row['rent']:,.0f}/mo" if row.get("rent") is not None else "$?/mo"
         layout_bits = " ".join(b for b in [
@@ -203,11 +221,29 @@ def main() -> int:
             f"est ${row['rent_estimate']:,.0f}" if row.get("rent_estimate") else ""] if b)
         print(f"[{result['tier']:8} {result['score']:3}] {rent:12} {layout_bits:18} "
               f"{row.get('title') or ''} ({row.get('source')})")
+        for t in targets:
+            if row.get("latitude") is None or row.get("longitude") is None:
+                continue
+            cache_key = (round(row["latitude"], 4), round(row["longitude"], 4), t["label"])
+            if cache_key not in commute_cache:
+                try:
+                    commute_cache[cache_key] = apartmentfinder.osrm_drive(
+                        row["latitude"], row["longitude"], t["lat"], t["lon"])
+                except apartmentfinder.FetchBlocked:
+                    commute_cache[cache_key] = None
+            est = commute_cache[cache_key]
+            if est:
+                bit = (f"commute: ~{est['minutes']:.0f} min drive "
+                       f"({est['miles']:.1f} mi) to {t['label']}")
+                if t["max_minutes"] is not None and est["minutes"] > t["max_minutes"]:
+                    bit += f" (over max {t['max_minutes']:g})"
+                print(f"           - {bit}")
         for reason in result["reasons"]:
             print(f"           - {reason}")
     print(f"\n{len(ranked)} listings ranked"
           + (f" (tier={args.tier})" if args.tier else "")
-          + f" of {len(rows)} captured")
+          + f" of {len(rows)} captured"
+          + ("; commute = OSRM driving estimate, no live traffic" if targets else ""))
     return 0
 
 

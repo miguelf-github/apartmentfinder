@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 UA = "Apartmentfinder/0.2 (research-and-review)"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -990,6 +990,51 @@ def rentcast_avm(api_key: str, listing: dict, timeout: int = 25) -> dict:
 
 _HUD_BED_LABELS = {0: "Efficiency", 1: "One-Bedroom", 2: "Two-Bedroom",
                    3: "Three-Bedroom", 4: "Four-Bedroom"}
+
+
+def geocode_address(address: str, timeout: int = 25) -> tuple[float, float]:
+    """Geocode a US street address with the Census geocoder (keyless).
+
+    Returns (latitude, longitude) of the first match. Raises FetchBlocked
+    when the address is empty or the geocoder finds no match.
+    """
+    if not address.strip():
+        raise FetchBlocked("geocode: no address given")
+    url = ("https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?"
+           + urllib.parse.urlencode({"address": address, "benchmark": "Public_AR_Current",
+                                     "format": "json"}))
+    data = fetch_json(url, timeout=timeout)
+    matches = (((data.get("result") or {}).get("addressMatches") or [])
+               if isinstance(data, dict) else [])
+    if not matches:
+        raise FetchBlocked(f"geocode: no match for address: {address}")
+    coords = matches[0].get("coordinates") or {}
+    lat, lon = _num(coords.get("y")), _num(coords.get("x"))
+    if lat is None or lon is None:
+        raise FetchBlocked(f"geocode: match without coordinates for: {address}")
+    return lat, lon
+
+
+def osrm_drive(lat1: float, lon1: float, lat2: float, lon2: float,
+               timeout: int = 25) -> dict:
+    """Driving estimate between two points, from OSRM (keyless).
+
+    Returns {"minutes": ..., "miles": ...} for the fastest route. This
+    is a road-network estimate with NO live traffic: good for comparing
+    listings against each other, optimistic at rush hour. Raises
+    FetchBlocked when OSRM finds no route.
+    """
+    url = (f"https://router.project-osrm.org/route/v1/driving/"
+           f"{lon1},{lat1};{lon2},{lat2}?overview=false")
+    data = fetch_json(url, timeout=timeout)
+    routes = data.get("routes") if isinstance(data, dict) else None
+    if not routes:
+        raise FetchBlocked("osrm: no route found")
+    minutes = _num(routes[0].get("duration"))
+    miles = _num(routes[0].get("distance"))
+    if minutes is None or miles is None:
+        raise FetchBlocked("osrm: route without duration/distance")
+    return {"minutes": minutes / 60.0, "miles": miles / 1609.344}
 
 
 def _county_fips(lat: float | None, lon: float | None, timeout: int = 25) -> tuple[str, str]:
