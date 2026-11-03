@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 UA = "Apartmentfinder/0.2 (research-and-review)"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -934,12 +934,85 @@ def hasdata_listings_via_connector(query: dict[str, object],
             if isinstance(it, dict)]
 
 
+def _parse_hasdata_property(data: object) -> dict:
+    """Extract rankable detail text from a HasData Zillow property payload.
+
+    The search scrape returns cards; the property scrape returns the
+    listing page itself: a free-text description, highlights, and
+    structured at-a-glance facts (Pets, Parking, Laundry, ...). The
+    facts are rendered as "Label: Value" lines so keyword gates and
+    must-have checks see them the way a human reading the page would.
+    Raises FetchBlocked when the payload carries no usable text.
+    """
+    prop = data.get("property") if isinstance(data, dict) else None
+    if not isinstance(prop, dict):
+        prop = data if isinstance(data, dict) else {}
+    facts: dict[str, str] = {}
+    reso = prop.get("resoData") if isinstance(prop.get("resoData"), dict) else {}
+    for fact in reso.get("atAGlanceFacts") or []:
+        if isinstance(fact, dict) and fact.get("factLabel") and fact.get("factValue"):
+            facts[str(fact["factLabel"])] = str(fact["factValue"])
+    parts = [str(prop.get("description") or "")]
+    parts += [f"{label}: {value}" for label, value in facts.items()]
+    highlights = prop.get("highlights")
+    if isinstance(highlights, list):
+        parts += [str(h) for h in highlights if h]
+    text = clean_text(". ".join(p for p in parts if p))
+    if not text:
+        raise FetchBlocked("hasdata-detail: property payload carried no text")
+    return {"detail_text": text, "facts": facts, "raw": data}
+
+
+def hasdata_detail(api_key: str, listing: dict, timeout: int = 120) -> dict:
+    """Full Zillow detail for one listing (HasData property scrape).
+
+    The search cards carry no description, amenities or pet policy, so
+    deal-breaker and must-have scans have nothing to read until this
+    runs. It costs credits per call (10 at HasData's published rate),
+    so it is an enrich step for finalists, not a sync step. Works for
+    any listing whose URL is a zillow.com page. With no raw key, falls
+    back to the stored Muse credential (custom.hasdata).
+    """
+    url = str(listing.get("url") or "")
+    if "zillow.com" not in url:
+        raise FetchBlocked("hasdata-detail: listing has no Zillow URL")
+    if api_key:
+        api_url = ("https://api.hasdata.com/scrape/zillow/property?"
+                   + urllib.parse.urlencode({"url": url}))
+        data = fetch_json(api_url, timeout=timeout, headers={"x-api-key": api_key})
+        return _parse_hasdata_property(data)
+    data = _hasdata_cli(["zillow-property", "--url", url], timeout=timeout + 60)
+    if data is None:
+        raise FetchBlocked("hasdata-detail: Muse connector returned nothing "
+                           "(connect HasData in Muse or set HASDATA_API_KEY)")
+    return _parse_hasdata_property(data)
+
+
+def merge_detail_text(con: sqlite3.Connection, key: str, detail_text: str) -> None:
+    """Append fetched detail text to a listing's stored description.
+
+    The ranker scans title + description for deal-breakers and
+    must-haves, so detail text has to land there, not only in the
+    enrichment record, before it can change a ranking.
+    """
+    row = con.execute("SELECT description FROM listings WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return
+    current = str(row[0] or "")
+    if detail_text in current:
+        return
+    merged = clean_text(current + ". " + detail_text)
+    con.execute("UPDATE listings SET description = ?, description_sha256 = ? WHERE key = ?",
+                (merged, hashlib.sha256(merged.encode()).hexdigest(), key))
+    con.commit()
+
+
 # ---------------------------------------------------------------------------
 # Enrichment providers (v0.2) — all optional; a missing key or coordinate
 # skips that provider with a note, never a crash and never a fake value.
 # ---------------------------------------------------------------------------
 
-ENRICH_PROVIDERS = ("walkscore", "rentcast-avm", "hud-fmr", "census-acs", "fema-flood", "airnow")
+ENRICH_PROVIDERS = ("walkscore", "rentcast-avm", "hud-fmr", "census-acs", "fema-flood", "airnow", "hasdata-detail")
 
 
 def walkscore_scores(api_key: str, lat: float | None, lon: float | None,
@@ -1269,6 +1342,8 @@ def enrich_listing(con: sqlite3.Connection, listing: dict, providers: list[str],
                 payload = fema_flood(lat, lon)
             elif provider == "airnow":
                 payload = airnow_aqi(keys.get("airnow", ""), lat, lon)
+            elif provider == "hasdata-detail":
+                payload = hasdata_detail(keys.get("hasdata", ""), listing)
             else:
                 notes.append(f"{provider}: unknown provider, skipped")
                 continue
@@ -1276,6 +1351,8 @@ def enrich_listing(con: sqlite3.Connection, listing: dict, providers: list[str],
             notes.append(str(exc))
             continue
         store_enrichment(con, key, provider, payload)
+        if provider == "hasdata-detail" and payload.get("detail_text"):
+            merge_detail_text(con, key, str(payload["detail_text"]))
         notes.append(f"{provider}: ok")
     return notes
 
@@ -1573,6 +1650,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         "rentcast": api_key_for("RENTCAST_API_KEY"),
         "hud": api_key_for("HUD_API_TOKEN"),
         "airnow": api_key_for("AIRNOW_API_KEY"),
+        "hasdata": api_key_for("HASDATA_API_KEY"),
     }
     if args.key:
         rows = [dict(r) for r in con.execute("SELECT * FROM listings WHERE key = ?", (args.key,))]

@@ -448,6 +448,63 @@ class EnrichmentProviderTests(unittest.TestCase):
         self.assertEqual(out["aqi_category"], "Moderate")
 
 
+class HasDataDetailTests(unittest.TestCase):
+    PAYLOAD = {"property": {
+        "description": "Sunny unit near the lake.",
+        "highlights": ["Granite counter tops"],
+        "resoData": {"atAGlanceFacts": [
+            {"factLabel": "Pets", "factValue": "No Pets"},
+            {"factLabel": "Parking", "factValue": "Off Street"},
+            {"factLabel": "Laundry", "factValue": "Shared"},
+            {"factLabel": "Cooling", "factValue": None}]}}}
+
+    def test_parse_property_facts_and_text(self):
+        out = apartmentfinder._parse_hasdata_property(self.PAYLOAD)
+        self.assertEqual(out["facts"]["Pets"], "No Pets")
+        self.assertIn("Pets: No Pets", out["detail_text"])
+        self.assertIn("Sunny unit", out["detail_text"])
+        self.assertNotIn("Cooling", out["detail_text"])
+
+    def test_detail_via_connector(self):
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.stdout = json.dumps(self.PAYLOAD)
+        listing = {"url": "https://www.zillow.com/homedetails/77_zpid/"}
+        with mock.patch.object(apartmentfinder, "HASDATA_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run", return_value=proc) as run:
+            out = apartmentfinder.hasdata_detail("", listing)
+        argv = run.call_args[0][0]
+        self.assertIn("zillow-property", argv)
+        self.assertIn("No Pets", out["detail_text"])
+
+    def test_detail_needs_zillow_url(self):
+        with self.assertRaises(apartmentfinder.FetchBlocked):
+            apartmentfinder.hasdata_detail("k", {"url": "https://example.com/x"})
+
+    def test_detail_merges_and_ranker_excludes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "evidence").mkdir()
+            con = apartmentfinder.database(root)
+            rec = apartmentfinder.normalize_hasdata({
+                "zpid": "77", "url": "https://www.zillow.com/homedetails/77_zpid/",
+                "unformattedPrice": 2000, "beds": 2, "baths": 1, "area": 850,
+                "address": "1 Main St, Springfield, IL 62701",
+                "latLong": {"latitude": 39.78, "longitude": -89.65}})
+            apartmentfinder.store_listing(con, root, rec)
+            listing = dict(con.execute("SELECT * FROM listings").fetchone())
+            with mock.patch.object(apartmentfinder, "fetch_json", return_value=self.PAYLOAD):
+                notes = apartmentfinder.enrich_listing(
+                    con, listing, ["hasdata-detail"], {"hasdata": "k"})
+            self.assertIn("hasdata-detail: ok", "; ".join(notes))
+            row = dict(con.execute("SELECT * FROM listings").fetchone())
+            self.assertIn("No Pets", row["description"])
+            prefs = {"budget": {"max_rent": 2500}, "layout": {}, "locations": [],
+                     "deal_breakers": ["no pets"], "must_have": []}
+            self.assertEqual(ranker.classify(row, prefs)["tier"], "excluded")
+            con.close()
+
+
 class EnrichFlowTests(unittest.TestCase):
     def test_migration_adds_columns(self):
         with tempfile.TemporaryDirectory() as temp:

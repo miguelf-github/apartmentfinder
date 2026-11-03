@@ -50,14 +50,15 @@
     }
   ],
   "enrichment": {
-    "_comment": "Providers run by `apartmentfinder.py enrich`. All optional: census-acs and fema-flood are keyless; walkscore (WALKSCORE_API_KEY), rentcast-avm (RENTCAST_API_KEY), hud-fmr (HUD_API_TOKEN) and airnow (AIRNOW_API_KEY) use free keys from ~/.config/apartmentfinder.env. Missing key or coordinates = skipped with a note. Signup caveat: a Walk Score key is issued instantly only if your signup email is on your own domain (matching the site calling the API); otherwise the request goes to manual review, about two business days.",
+    "_comment": "Providers run by `apartmentfinder.py enrich`. All optional: census-acs and fema-flood are keyless; walkscore (WALKSCORE_API_KEY), rentcast-avm (RENTCAST_API_KEY), hud-fmr (HUD_API_TOKEN) and airnow (AIRNOW_API_KEY) use free keys from ~/.config/apartmentfinder.env. hasdata-detail (HASDATA_API_KEY) fetches the full Zillow detail page for one listing at a time (about 10 credits a call, so run it on finalists only) and merges the text into the listing, which is what lets deal-breaker and must-have checks see pet policies, laundry and parking. Missing key or coordinates = skipped with a note. Signup caveat: a Walk Score key is issued instantly only if your signup email is on your own domain (matching the site calling the API); otherwise the request goes to manual review, about two business days.",
     "providers": [
       "walkscore",
       "rentcast-avm",
       "hud-fmr",
       "census-acs",
       "fema-flood",
-      "airnow"
+      "airnow",
+      "hasdata-detail"
     ]
   }
 }

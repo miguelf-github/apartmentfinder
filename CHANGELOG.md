@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0 — 2026-11-03
+
+- **New enrich provider: `hasdata-detail`.** Zillow search results are cards (price, beds, photos) with no description, amenities, or pet policy, so deal-breaker and must-have text scans had nothing to read and facts like a "no pets" policy surfaced only as "unconfirmed". This provider fetches the full Zillow detail page for one listing via HasData's property endpoint (about 10 credits a call, so it is meant for finalists: `enrich --provider hasdata-detail --key <listing>`), renders its structured facts (Pets, Parking, Laundry, ...) as text alongside the listing's own description, stores the raw payload as an enrichment record, and merges the text into the listing's stored description so the next ranking applies the gates to it. Found in live testing: a top-ranked Oakland listing whose page said "Pets: No Pets" now excludes itself for a dog owner, while the same page confirmed its shared laundry and off-street parking. Raw key or Muse vault credential, same as the other HasData paths.
+- 51 tests (4 new for the property parsing, connector fallback, and the merge-then-exclude flow).
+
 ## 0.5.0 — 2026-11-03
 
 - **Commute estimates in the ranker.** When `commute_targets` in preferences has an address (for example a workplace), the ranker now geocodes it with the keyless Census geocoder and prints a driving estimate for every listing it presents: OSRM road-network time and distance, cached per building. The estimate carries no live traffic, says so in the output, and is flagged when it exceeds the target's `max_minutes`; it never excludes a listing. Listings without coordinates, or a target that will not geocode, are skipped cleanly. Verified live: East Palo Alto listings to a work address across the bay came back at roughly 22 to 26 minutes (12.7 to 14.6 miles) off-peak.
