@@ -64,7 +64,7 @@ python3 -m unittest discover -s tests -v
 
 There isn't one for the public: Zillow retired its public API (its remaining Bridge program needs MLS/broker affiliation), and Apartments.com publishes no developer API at all. RentCast is the self-serve route — it aggregates MLS and public listing sources nationwide and has a real free tier. The direct-URL importer plus the home-search browser flow covers anything RentCast misses.
 
-All optional keys (RentCast, HasData, Walk Score, HUD, AirNow) live in the same place: the environment or `~/.config/apartmentfinder.env` (chmod 600), one `NAME=value` per line. Copy a source or provider in from the example config, add its key, and it turns on at the next sync/enrich — remove the key and it skips itself again. Nothing is ever required beyond the core tool.
+All optional keys (RentCast, HasData, Walk Score, HUD, AirNow) live in the same place: the environment or `~/.config/apartmentfinder.env` (chmod 600), one `NAME=value` per line. Copy a source or provider in from the example config, add its key, and it turns on at the next sync/enrich — remove the key and it skips itself again. Nothing is ever required beyond the core tool. One signup caveat: a Walk Score API key is issued instantly only if your signup email is on your own domain (the domain of the site calling the API); with a Gmail-style address the request goes to manual review, about two business days. Until a key arrives, RealtyAPI's per-property walk score endpoint covers Apartments.com listings.
 
 ## Evidence states
 

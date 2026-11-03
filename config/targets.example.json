@@ -50,7 +50,7 @@
     }
   ],
   "enrichment": {
-    "_comment": "Providers run by `apartmentfinder.py enrich`. All optional: census-acs and fema-flood are keyless; walkscore (WALKSCORE_API_KEY), rentcast-avm (RENTCAST_API_KEY), hud-fmr (HUD_API_TOKEN) and airnow (AIRNOW_API_KEY) use free keys from ~/.config/apartmentfinder.env. Missing key or coordinates = skipped with a note.",
+    "_comment": "Providers run by `apartmentfinder.py enrich`. All optional: census-acs and fema-flood are keyless; walkscore (WALKSCORE_API_KEY), rentcast-avm (RENTCAST_API_KEY), hud-fmr (HUD_API_TOKEN) and airnow (AIRNOW_API_KEY) use free keys from ~/.config/apartmentfinder.env. Missing key or coordinates = skipped with a note. Signup caveat: a Walk Score key is issued instantly only if your signup email is on your own domain (matching the site calling the API); otherwise the request goes to manual review, about two business days.",
     "providers": [
       "walkscore",
       "rentcast-avm",
