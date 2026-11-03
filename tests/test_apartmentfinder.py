@@ -354,10 +354,44 @@ class EnrichmentProviderTests(unittest.TestCase):
             out = apartmentfinder.rentcast_avm("k", listing)
         self.assertEqual(out["rent_estimate"], 2350.0)
 
+    HUD_LISTING = {"zip": "62701", "latitude": 39.78, "longitude": -89.65, "beds": 2.0}
+    HUD_GEO = {"result": {"geographies": {"Counties": [{"STATE": "17", "COUNTY": "167"}]}}}
+
     def test_hud_fmr_finds_bedroom_figure(self):
-        payload = {"data": {"basicdata": [{"zipcode": "62701", "Two-Bedroom": 1425, "One-Bedroom": 1180}]}}
-        with mock.patch.object(apartmentfinder, "fetch_json", return_value=payload):
-            out = apartmentfinder.hud_fmr("tok", "62701", 2.0)
+        # The county is resolved from coordinates, then the county entity
+        # is queried; figures may arrive as strings ("1425").
+        fmr = {"data": {"area_name": "Springfield, IL HUD Metro FMR Area",
+                        "basicdata": {"Two-Bedroom": "1425", "One-Bedroom": 1180}}}
+        with mock.patch.object(apartmentfinder, "fetch_json",
+                               side_effect=[self.HUD_GEO, fmr]) as fj:
+            out = apartmentfinder.hud_fmr("tok", dict(self.HUD_LISTING))
+        self.assertEqual(out["fmr_rent"], 1425.0)
+        self.assertIn("fmr/data/1716799999", fj.call_args_list[1][0][0])
+        self.assertEqual(fj.call_args_list[1].kwargs["headers"],
+                         {"Authorization": "Bearer tok"})
+
+    def test_hud_fmr_smallarea_picks_zip_row(self):
+        payload = {"data": {"area_name": "Metro", "basicdata": [
+            {"zip_code": "MSA level", "Two-Bedroom": 2000},
+            {"zip_code": "20001", "Two-Bedroom": 2840},
+            {"zip_code": "20002", "Two-Bedroom": 2020}]}}
+        out = apartmentfinder._extract_fmr(payload, 2.0, "20001")
+        self.assertEqual(out["fmr_rent"], 2840.0)
+        self.assertTrue(out["smallarea"])
+
+    def test_hud_fmr_falls_back_to_connector(self):
+        envelope = json.dumps({"data": {"area_name": "Springfield, IL HUD Metro FMR Area",
+                                        "basicdata": {"Two-Bedroom": 1425}}})
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.stdout = envelope
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=self.HUD_GEO), \
+             mock.patch.object(apartmentfinder, "HUD_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run", return_value=proc) as run:
+            out = apartmentfinder.hud_fmr("", dict(self.HUD_LISTING))
+        argv = run.call_args[0][0]
+        self.assertIn("fmr-data", argv)
+        self.assertIn("1716799999", argv)
         self.assertEqual(out["fmr_rent"], 1425.0)
 
     def test_census_acs_flow(self):

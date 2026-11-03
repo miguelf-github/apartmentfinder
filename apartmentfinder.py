@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 UA = "Apartmentfinder/0.2 (research-and-review)"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -992,37 +992,124 @@ _HUD_BED_LABELS = {0: "Efficiency", 1: "One-Bedroom", 2: "Two-Bedroom",
                    3: "Three-Bedroom", 4: "Four-Bedroom"}
 
 
-def hud_fmr(token: str, zip_code: str, beds: float | None, timeout: int = 25) -> dict:
-    """HUD Fair Market Rent for a ZIP (free HUD API token required).
+def _county_fips(lat: float | None, lon: float | None, timeout: int = 25) -> tuple[str, str]:
+    """Resolve coordinates to (state, county) FIPS via the Census geocoder.
 
-    Parses defensively: HUD's payload shape varies by year and by whether
-    the ZIP is a small-area FMR ZIP, so bedroom figures are searched in the
-    returned records rather than assumed at one fixed path.
+    Keyless; the same geocoder the census-acs provider uses. Raises
+    FetchBlocked when there are no coordinates or no county is found.
     """
-    if not token:
-        raise FetchBlocked("hud-fmr: no HUD_API_TOKEN configured (free at huduser.gov)")
+    if lat is None or lon is None:
+        raise FetchBlocked("hud-fmr: listing has no coordinates to resolve its county")
+    geo_url = ("https://geocoding.geo.census.gov/geocoder/geographies/coordinates?"
+               + urllib.parse.urlencode({"x": lon, "y": lat, "benchmark": "Public_AR_Current",
+                                         "vintage": "Current_Current", "format": "json"}))
+    geo = fetch_json(geo_url, timeout=timeout)
+    counties = ((((geo.get("result") or {}).get("geographies") or {}).get("Counties") or [])
+                if isinstance(geo, dict) else [])
+    if not counties:
+        raise FetchBlocked("hud-fmr: Census geocoder found no county for these coordinates")
+    return str(counties[0].get("STATE") or ""), str(counties[0].get("COUNTY") or "")
+
+
+def hud_fmr(token: str, listing: dict, timeout: int = 25) -> dict:
+    """HUD Fair Market Rent for a listing's FMR area (free HUD token).
+
+    The HUD API has no by-ZIP endpoint: FMRs are published per county or
+    metro entity, and ZIP-level figures exist only inside small-area
+    metro responses. So this resolves the listing's county from its
+    coordinates (Census geocoder, keyless), queries that county's FMR
+    entity, and when the response carries per-ZIP small-area rows it
+    picks the listing's own ZIP. (The v0.2 version passed the ZIP as the
+    entity id, which HUD rejects with HTTP 400; live testing in v0.4
+    caught it.) With no raw token, falls back to the stored Muse
+    credential (custom.hud), raising FetchBlocked if that fails too.
+    """
+    zip_code = str(listing.get("zip") or "")
     if not zip_code:
         raise FetchBlocked("hud-fmr: listing has no ZIP")
-    url = f"https://www.huduser.gov/hudapi/public/fmr/data/{zip_code}"
+    state, county = _county_fips(listing.get("latitude"), listing.get("longitude"),
+                                 timeout=timeout)
+    entity = f"{state}{county}99999"
+    if not token:
+        return hud_fmr_via_connector(entity, listing)
+    url = f"https://www.huduser.gov/hudapi/public/fmr/data/{entity}"
     data = fetch_json(url, timeout=timeout, headers={"Authorization": f"Bearer {token}"})
+    return _extract_fmr(data, listing.get("beds"), zip_code)
+
+
+def _extract_fmr(data: object, beds: float | None, zip_code: str) -> dict:
+    """Pick the bedroom figure out of an FMR entity response.
+
+    basicdata is a dict of area-level figures for most areas, or a list
+    of per-ZIP rows for small-area metros (then the listing's ZIP wins,
+    with the "MSA level" row as fallback). Figures may be strings
+    ("948.0") or numbers, so they go through _num either way.
+    """
     label = _HUD_BED_LABELS.get(int(beds) if beds is not None else 2, "Two-Bedroom")
-    found: dict[str, object] = {"raw": data}
-    stack = [data]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == label and isinstance(value, (int, float)):
-                    found["fmr_rent"] = float(value)
-                if key.lower().replace(" ", "").replace("-", "") == label.lower().replace("-", "") and isinstance(value, (int, float)):
-                    found["fmr_rent"] = float(value)
-                stack.append(value)
-        elif isinstance(node, list):
-            stack.extend(node)
-    if "fmr_rent" not in found:
+    node = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+    if not isinstance(node, dict):
+        raise FetchBlocked("hud-fmr: unexpected response shape")
+    basic = node.get("basicdata")
+    row: object = basic
+    smallarea = False
+    if isinstance(basic, list):
+        smallarea = True
+        row = next((r for r in basic if isinstance(r, dict)
+                    and str(r.get("zip_code")) == zip_code), None)
+        if row is None:
+            row = next((r for r in basic if isinstance(r, dict)
+                        and str(r.get("zip_code")) == "MSA level"), None)
+        if row is None and basic:
+            row = basic[0]
+    if not isinstance(row, dict):
+        raise FetchBlocked("hud-fmr: no basicdata in response")
+    value = _num(row.get(label))
+    if value is None:
         raise FetchBlocked(f"hud-fmr: no {label} figure found in response for ZIP {zip_code}")
-    found["bedroom_label"] = label
-    return found
+    return {"fmr_rent": value, "bedroom_label": label,
+            "area_name": str(node.get("area_name") or node.get("county_name")
+                             or node.get("metro_name") or ""),
+            "smallarea": smallarea, "raw": data}
+
+
+HUD_CLI = os.path.expanduser("~/workspace/custom-connectors/custom.hud/bin/hud_api.py")
+
+
+def _hud_cli(args: list[str], timeout: int = 90) -> object:
+    """Run the custom.hud connector CLI; parsed JSON or None.
+
+    Same vault pattern as _rentcast_cli: the token is swapped in by the
+    egress proxy, so no raw token exists in this process.
+    """
+    if not os.path.exists(HUD_CLI):
+        return None
+    try:
+        proc = subprocess.run([sys.executable, HUD_CLI, *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"hud connector CLI: {exc}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"hud connector CLI failed: {proc.stdout.strip()[:200]}", file=sys.stderr)
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        print("hud connector CLI: unparseable output", file=sys.stderr)
+        return None
+    if isinstance(data, dict) and data.get("error"):
+        print(f"hud connector: {data['error']}", file=sys.stderr)
+        return None
+    return data
+
+
+def hud_fmr_via_connector(entity: str, listing: dict) -> dict:
+    """HUD FMR via the stored Muse credential. Raises FetchBlocked."""
+    data = _hud_cli(["fmr-data", "--entity", str(entity)])
+    if data is None:
+        raise FetchBlocked("hud-fmr: Muse connector returned nothing "
+                           "(connect HUD in Muse or set HUD_API_TOKEN)")
+    return _extract_fmr(data, listing.get("beds"), str(listing.get("zip") or ""))
 
 
 def census_acs(lat: float | None, lon: float | None, timeout: int = 25) -> dict:
@@ -1130,7 +1217,7 @@ def enrich_listing(con: sqlite3.Connection, listing: dict, providers: list[str],
             elif provider == "rentcast-avm":
                 payload = rentcast_avm(keys.get("rentcast", ""), listing)
             elif provider == "hud-fmr":
-                payload = hud_fmr(keys.get("hud", ""), str(listing.get("zip") or ""), listing.get("beds"))
+                payload = hud_fmr(keys.get("hud", ""), listing)
             elif provider == "census-acs":
                 payload = census_acs(lat, lon)
             elif provider == "fema-flood":

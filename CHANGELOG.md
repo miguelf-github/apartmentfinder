@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0 — 2026-11-03
+
+- **HUD FMR provider fixed to the real API, and connected through Muse.** Live testing caught a design error that dated back to v0.2 (which was only ever mock-tested): the provider passed the listing's ZIP code as the HUD entity id, but the HUD API has no by-ZIP endpoint and rejects it with HTTP 400. The provider now resolves the listing's county from its coordinates (Census geocoder, keyless), queries that county's FMR entity, picks the listing's own ZIP row when the area publishes small-area (per-ZIP) figures, and parses figures that arrive as strings. It also accepts the HUD token from Muse (Secure Vault, `custom.hud`) when no raw `HUD_API_TOKEN` is set. Verified live: a San Mateo County listing enriched with the San Francisco HUD Metro FMR Area two-bedroom figure of $3,697.
+- 43 tests (HUD tests rewritten for the real flow, plus a small-area ZIP-row test).
+
 ## 0.3.1 — 2026-11-03
 
 - The HasData Zillow source now also works with a **credential connected in Muse** (Secure Vault, `custom.hasdata`), completing the pattern: all three keyed sync sources (RentCast, RealtyAPI, HasData) accept either a raw key in the env/secrets file or the Muse vault credential, picked up automatically. Verified live the day it shipped: 15 Zillow listings stored on the first vault-backed sync.
