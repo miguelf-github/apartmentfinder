@@ -317,6 +317,26 @@ class HasDataTests(unittest.TestCase):
         self.assertEqual(records[0]["rent"], 1900.0)
 
 
+    def test_listings_via_connector(self):
+        envelope = json.dumps({"listings": [{
+            "zpid": 777, "unformattedPrice": 1600, "beds": 2, "baths": 1,
+            "address": {"streetAddress": "3 Pine St", "city": "Springfield",
+                        "state": "IL", "zipcode": "62701"}}]})
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.stdout = envelope
+        with mock.patch.object(apartmentfinder, "HASDATA_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run", return_value=proc) as run:
+            records = apartmentfinder.hasdata_listings_via_connector(
+                {"keyword": "Springfield, IL"}, limit=10)
+        argv = run.call_args[0][0]
+        self.assertIn("zillow-listing", argv)
+        self.assertIn("Springfield, IL", argv)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["rent"], 1600.0)
+        self.assertEqual(records[0]["source"], "hasdata-zillow")
+
+
 class EnrichmentProviderTests(unittest.TestCase):
     def test_walkscore_parse(self):
         payload = {"status": 1, "walkscore": 82, "transit": {"score": 55}, "bike": {"score": 70}}

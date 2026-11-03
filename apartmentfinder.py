@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 UA = "Apartmentfinder/0.2 (research-and-review)"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -868,15 +868,70 @@ def hasdata_listings(api_key: str, query: dict[str, object], limit: int = 41,
             params[dst_key] = query[src_key]
     url = "https://api.hasdata.com/scrape/zillow/listing?" + urllib.parse.urlencode(params)
     data = fetch_json(url, timeout=timeout, headers={"x-api-key": api_key})
-    rows: list = []
+    return [normalize_hasdata(it) for it in _hasdata_rows(data)[:limit]
+            if isinstance(it, dict)]
+
+
+def _hasdata_rows(data: object) -> list:
+    """Pull the listing rows out of a HasData response envelope."""
     if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
+        return data
+    if isinstance(data, dict):
         for key in ("listings", "results", "properties", "data"):
             if isinstance(data.get(key), list):
-                rows = data[key]
-                break
-    return [normalize_hasdata(it) for it in rows[:limit] if isinstance(it, dict)]
+                return data[key]
+    return []
+
+
+HASDATA_CLI = os.path.expanduser("~/workspace/custom-connectors/custom.hasdata/bin/hasdata_api.py")
+
+
+def _hasdata_cli(args: list[str], timeout: int = 120) -> object:
+    """Run the custom.hasdata connector CLI; parsed JSON or None.
+
+    Same vault pattern as _rentcast_cli: the credential is swapped in by
+    the egress proxy, so no raw key exists in this process.
+    """
+    if not os.path.exists(HASDATA_CLI):
+        return None
+    try:
+        proc = subprocess.run([sys.executable, HASDATA_CLI, *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"hasdata connector CLI: {exc}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"hasdata connector CLI failed: {proc.stdout.strip()[:200]}", file=sys.stderr)
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        print("hasdata connector CLI: unparseable output", file=sys.stderr)
+        return None
+    if isinstance(data, dict) and data.get("error"):
+        print(f"hasdata connector: {data['error']}", file=sys.stderr)
+        return None
+    return data
+
+
+def hasdata_listings_via_connector(query: dict[str, object],
+                                   limit: int = 41) -> list[dict[str, object]]:
+    """HasData Zillow search via the stored Muse credential (custom.hasdata)."""
+    keyword = str(query.get("keyword") or "").strip()
+    if not keyword:
+        keyword = ", ".join(p for p in [str(query.get("city") or ""),
+                                        str(query.get("state") or "")] if p)
+    if not keyword:
+        return []
+    args = ["zillow-listing", "--keyword", keyword,
+            "--type", str(query.get("type") or "forRent")]
+    for src, flag in (("min_beds", "--min-beds"), ("max_rent", "--max-rent"),
+                      ("min_baths", "--min-baths")):
+        if query.get(src) not in (None, ""):
+            args += [flag, str(query[src])]
+    data = _hasdata_cli(args)
+    return [normalize_hasdata(it) for it in _hasdata_rows(data)[:limit]
+            if isinstance(it, dict)]
 
 
 # ---------------------------------------------------------------------------
@@ -1208,12 +1263,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 print(f"{name}: realty-us -> {len(records)} listings")
             elif kind == "hasdata-zillow":
                 key = api_key_for(str(source.get("api_key_env") or "HASDATA_API_KEY"))
-                if not key:
-                    notes.append(f"{name}: skipped, no HASDATA_API_KEY configured "
-                                 f"(free key at hasdata.com, 1,000 credits/month)")
-                    continue
-                records = hasdata_listings(key, source.get("query") or {}, limit=limit)
+                query = source.get("query") or {}
+                if key:
+                    records = hasdata_listings(key, query, limit=limit)
+                else:
+                    records = hasdata_listings_via_connector(query, limit=limit)
                 print(f"{name}: hasdata-zillow -> {len(records)} listings")
+                if not key and not records:
+                    notes.append(f"{name}: no raw HASDATA_API_KEY and the Muse "
+                                 f"connector returned nothing (see stderr); add a key "
+                                 f"to ~/.config/apartmentfinder.env or connect HasData in Muse")
             else:
                 if kind:
                     raise SystemExit(f"source {name}: unknown kind '{kind}'")

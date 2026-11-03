@@ -32,7 +32,7 @@
       }
     },
     {
-      "_comment": "Optional Zillow source via HasData (real Zillow for-rent search, no bot-wall fights). Free key at hasdata.com: 1,000 credits/month, no card. Skipped when no HASDATA_API_KEY is set.",
+      "_comment": "Optional Zillow source via HasData (real Zillow for-rent search, no bot-wall fights). Free key at hasdata.com: 1,000 credits/month, no card; credits are charged per row returned. Key in env/secrets file as HASDATA_API_KEY, or connect HasData in Muse and sync uses the vault credential automatically. Skipped with a note when neither key route exists.",
       "api_key_env": "HASDATA_API_KEY",
       "kind": "hasdata-zillow",
       "limit": 41,

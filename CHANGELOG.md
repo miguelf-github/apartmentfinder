@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 — 2026-11-03
+
+- The HasData Zillow source now also works with a **credential connected in Muse** (Secure Vault, `custom.hasdata`), completing the pattern: all three keyed sync sources (RentCast, RealtyAPI, HasData) accept either a raw key in the env/secrets file or the Muse vault credential, picked up automatically. Verified live the day it shipped: 15 Zillow listings stored on the first vault-backed sync.
+- 41 tests (1 new for the HasData connector fallback).
+
 ## 0.3.0 — 2026-11-03
 
 - **New source: Apartments.com via RealtyAPI** (`kind: "realtyapi-apartments"`), the first real Apartments.com search feed for the tool (previously only pasted links). One credit per location search; free tier is 250 credits/month. Works with a raw `REALTYAPI_API_KEY` or with RealtyAPI connected in Muse (Secure Vault, `custom.realtyapi`), picked up automatically. Verified live the day it shipped: 50 listings stored from one ZIP search.
