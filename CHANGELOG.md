@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — 2026-11-03
+
+- **New source: Apartments.com via RealtyAPI** (`kind: "realtyapi-apartments"`), the first real Apartments.com search feed for the tool (previously only pasted links). One credit per location search; free tier is 250 credits/month. Works with a raw `REALTYAPI_API_KEY` or with RealtyAPI connected in Muse (Secure Vault, `custom.realtyapi`), picked up automatically. Verified live the day it shipped: 50 listings stored from one ZIP search.
+- Honest data shape: RealtyAPI search results are building-level placards, so rent records the low end of the building's rent range and beds/baths/sqft stay unknown (missing facts never exclude in the ranker). Unit-level detail sits behind RealtyAPI's `/details/*` endpoints, keyed by `listingKey`, and is not wired yet.
+- The connector is registered for six US portal hosts (apartments, realtor, redfin, zillow, trulia, homes), so the other portals can be wired later without re-entering the key.
+- 40 tests (5 new for the RealtyAPI source).
+
 ## 0.2.1 — 2026-11-03
 
 - RentCast now also works with a **credential connected in Muse** (Secure Vault, `custom.rentcast`), not just a raw key in the environment or secrets file — the same vault-fallback pattern hiddenjob uses for JSearch. Sync and the `rentcast-avm` enrichment try the raw key first, then the connector CLI at `~/workspace/custom-connectors/custom.rentcast/bin/rentcast_api.py`. Nothing about the ledger or config changes; connect the key in Muse and the next sync picks it up.

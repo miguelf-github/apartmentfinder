@@ -12,6 +12,15 @@
       "_fixed_query_alternative": "Or replace from_preferences with \"query\": {\"zipCode\": \"62701\", \"state\": \"IL\"} for one fixed search."
     },
     {
+      "_comment": "Optional Apartments.com source via RealtyAPI (realtyapi.io). One credit per location search; free tier 250 credits/month. Key in env/secrets file as REALTYAPI_API_KEY, or connect RealtyAPI in Muse and sync uses the vault credential automatically. Building-level results: rent is the low end of the building's range, beds/baths stay unknown. Skipped with a note when neither key route exists.",
+      "api_key_env": "REALTYAPI_API_KEY",
+      "from_preferences": true,
+      "kind": "realtyapi-apartments",
+      "limit": 50,
+      "name": "realtyapi-apartments",
+      "_fixed_query_alternative": "Or replace from_preferences with \"query\": {\"location\": \"Springfield, IL\"} (a ZIP also works) for one fixed search. Extra API filters pass through, e.g. \"priceRange\": \"min:1000,max:2500\", \"bedRange\": \"min:2\"."
+    },
+    {
       "_comment": "Optional second source: Realtor.com data via RapidAPI (apidojo Realty in US, ~500 free requests/month). Skipped when no RAPIDAPI_KEY is set.",
       "api_key_env": "RAPIDAPI_KEY",
       "kind": "realty-us",

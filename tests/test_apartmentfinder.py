@@ -227,6 +227,70 @@ class ConnectorFallbackTests(unittest.TestCase):
         self.assertEqual(out["rent_estimate"], 1825.0)
 
 
+class RealtyApiApartmentsTests(unittest.TestCase):
+    """RealtyAPI (realtyapi.io) Apartments.com source, raw key + vault."""
+
+    PLACARD = {
+        "listingKey": "ab12cd", "name": "Maple Court",
+        "oneLineAddress": "12 Oak St, Springfield, IL 62701",
+        "address": {"lineOne": "12 Oak St", "city": "Springfield",
+                    "state": "IL", "postalCode": "62701", "countryCode": "US"},
+        "latitude": 39.78, "longitude": -89.65, "phone": "(217) 555-0100",
+        "bedRange": "1 - 3 Beds", "rentRange": "$1,150 - 1,875",
+        "propertyType": "Apartment", "availabilityText": "Available Now",
+        "amenityNames": ["Pool", "Gated"],
+        "propertyManager": {"name": "Maple Mgmt"},
+    }
+
+    def test_money_range_parsing(self):
+        self.assertEqual(apartmentfinder._parse_money_range("$2,000 - 3,355"), (2000.0, 3355.0))
+        self.assertEqual(apartmentfinder._parse_money_range("$2,245"), (2245.0, 2245.0))
+        self.assertEqual(apartmentfinder._parse_money_range("Call for Rent"), (None, None))
+        self.assertEqual(apartmentfinder._parse_money_range(""), (None, None))
+        self.assertEqual(apartmentfinder._parse_money_range(None), (None, None))
+
+    def test_normalize_placard(self):
+        rec = apartmentfinder.normalize_realtyapi_apartments(dict(self.PLACARD))
+        self.assertEqual(rec["source"], "realtyapi-apartments")
+        self.assertEqual(rec["key"], "realtyapi-apartments:ab12cd")
+        self.assertEqual(rec["title"], "Maple Court")
+        self.assertEqual(rec["city"], "Springfield")
+        self.assertEqual(rec["zip"], "62701")
+        self.assertEqual(rec["rent"], 1150.0)  # low end of the building range
+        self.assertIsNone(rec["beds"])         # placards carry ranges, not unit facts
+        self.assertEqual(rec["latitude"], 39.78)
+
+    def test_listings_raw_key(self):
+        envelope = {"searchResults": [dict(self.PLACARD)], "total": 1}
+        with mock.patch.object(apartmentfinder, "fetch_json", return_value=envelope) as fj:
+            records = apartmentfinder.realtyapi_apartments_listings(
+                "KEY", {"location": "Springfield, IL"}, limit=10)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(fj.call_args.kwargs["headers"], {"x-realtyapi-key": "KEY"})
+        self.assertIn("location=Springfield", fj.call_args[0][0])
+
+    def test_listings_via_connector(self):
+        envelope = json.dumps({"searchResults": [dict(self.PLACARD)], "total": 1})
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.stdout = envelope
+        with mock.patch.object(apartmentfinder, "REALTYAPI_CLI", __file__), \
+             mock.patch.object(apartmentfinder.subprocess, "run", return_value=proc) as run:
+            records = apartmentfinder.realtyapi_apartments_via_connector(
+                {"location": "62701"}, limit=10)
+        argv = run.call_args[0][0]
+        self.assertIn("apartments", argv)
+        self.assertIn("location=62701", argv)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["rent"], 1150.0)
+
+    def test_locations_from_prefs(self):
+        prefs = {"locations": [{"zipCode": "62701", "city": "Springfield", "state": "IL"},
+                               {"city": "Decatur", "state": "IL"}, {}]}
+        self.assertEqual(apartmentfinder.realtyapi_locations(prefs),
+                         ["62701", "Decatur, IL"])
+
+
 class HasDataTests(unittest.TestCase):
     def test_normalize_row(self):
         item = {"zpid": "12345", "url": "https://www.zillow.com/homedetails/12345_zpid/",

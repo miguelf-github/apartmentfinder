@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 UA = "Apartmentfinder/0.2 (research-and-review)"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -287,6 +287,171 @@ def rentcast_avm_via_connector(listing: dict) -> dict:
     return {"rent_estimate": _num(data.get("rent")),
             "rent_range_low": _num(data.get("rentRangeLow")),
             "rent_range_high": _num(data.get("rentRangeHigh")), "raw": data}
+
+
+# ---------------------------------------------------------------------------
+# Source: Apartments.com via RealtyAPI (realtyapi.io), raw key or Muse vault
+# ---------------------------------------------------------------------------
+
+REALTYAPI_APARTMENTS_URL = "https://apartments.realtyapi.io/search/bylocation"
+REALTYAPI_CLI = os.path.expanduser("~/workspace/custom-connectors/custom.realtyapi/bin/realtyapi_api.py")
+
+
+def _parse_money_range(text: object) -> tuple[float | None, float | None]:
+    """Parse a portal range string like "$2,000 - 3,355" into (low, high)."""
+    if not isinstance(text, str):
+        return None, None
+    nums = [_num(p.replace("$", "").replace(",", "").strip())
+            for p in text.split("-")]
+    nums = [n for n in nums if n is not None]
+    if not nums:
+        return None, None
+    return nums[0], nums[-1]
+
+
+def normalize_realtyapi_apartments(item: dict) -> dict[str, object]:
+    """Normalize one RealtyAPI Apartments search placard.
+
+    Search results are building-level placards: rent and beds come back as
+    ranges ("$2,000 - 3,355", "Studio - 4 Beds"), not unit facts, so rent
+    records the range's low end (also what a searcher sees first) and
+    beds/baths/sqft stay unknown. Missing facts never exclude in the
+    ranker. Unit-level detail lives behind the /details endpoints, which
+    are not wired here. The raw placard is preserved as evidence.
+    """
+    ext_id = str(item.get("listingKey") or "")
+    addr = item.get("address") if isinstance(item.get("address"), dict) else {}
+    address = str(item.get("oneLineAddress") or "").strip()
+    if not address:
+        parts = [str(addr.get("lineOne") or ""), str(addr.get("city") or ""),
+                 str(addr.get("state") or ""), str(addr.get("postalCode") or "")]
+        address = ", ".join(p for p in parts if p).strip()
+    rent_low, rent_high = _parse_money_range(item.get("rentRange") or item.get("priceRange"))
+    manager = item.get("propertyManager") if isinstance(item.get("propertyManager"), dict) else {}
+    amenities = [str(a) for a in item.get("amenityNames") or [] if a]
+    desc_parts = [
+        str(item.get("name") or ""),
+        address,
+        f"Rents {item.get('rentRange')}" if item.get("rentRange") else "",
+        str(item.get("bedRange") or ""),
+        str(item.get("propertyType") or ""),
+        str(item.get("availabilityText") or ""),
+        "Amenities: " + ", ".join(amenities) if amenities else "",
+        f"Manager: {manager.get('name')}" if manager.get("name") else "",
+        f"Phone: {item.get('phone')}" if item.get("phone") else "",
+    ]
+    description = clean_text(". ".join(p for p in desc_parts if p))
+    return {
+        "key": f"realtyapi-apartments:{ext_id}" if ext_id else
+               f"realtyapi-apartments:{hashlib.sha256(address.encode()).hexdigest()[:16]}",
+        "url": "",
+        "source": "realtyapi-apartments",
+        "external_id": ext_id,
+        "title": str(item.get("name") or "") or address or "Untitled listing",
+        "address": address,
+        "city": str(addr.get("city") or ""),
+        "state": str(addr.get("state") or ""),
+        "zip": str(addr.get("postalCode") or ""),
+        "rent": rent_low,
+        "beds": None,
+        "baths": None,
+        "sqft": None,
+        "property_type": str(item.get("propertyType") or ""),
+        "status": str(item.get("availabilityText") or ""),
+        "listed_date": "",
+        "days_on_market": None,
+        "latitude": _num(item.get("latitude")),
+        "longitude": _num(item.get("longitude")),
+        "description": description,
+        "description_sha256": hashlib.sha256(description.encode()).hexdigest(),
+        "evidence_text": json.dumps(item, indent=2),
+        "evidence_suffix": ".json",
+    }
+
+
+def _realtyapi_cli(args: list[str], timeout: int = 120) -> object:
+    """Run the custom.realtyapi connector CLI; parsed JSON or None.
+
+    Same vault pattern as _rentcast_cli: the credential is swapped in by
+    the egress proxy, so no raw key exists in this process.
+    """
+    if not os.path.exists(REALTYAPI_CLI):
+        return None
+    try:
+        proc = subprocess.run([sys.executable, REALTYAPI_CLI, *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"realtyapi connector CLI: {exc}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"realtyapi connector CLI failed: {proc.stdout.strip()[:200]}", file=sys.stderr)
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        print("realtyapi connector CLI: unparseable output", file=sys.stderr)
+        return None
+    if isinstance(data, dict) and data.get("error"):
+        print(f"realtyapi connector: {data['error']}", file=sys.stderr)
+        return None
+    return data
+
+
+def _realtyapi_apartments_params(query: dict[str, object], limit: int) -> dict[str, object]:
+    params: dict[str, object] = {"location": str(query.get("location") or ""),
+                                 "resultCount": max(1, min(limit, 500))}
+    for key in ("sortOrder", "propertyType", "priceRange", "bedRange", "bathRange",
+                "squareFeetRange", "petPolicy", "amenities", "specialties"):
+        if query.get(key) not in (None, ""):
+            params[key] = query[key]
+    return params
+
+
+def realtyapi_apartments_listings(api_key: str, query: dict[str, object],
+                                  limit: int = 50, timeout: int = 60) -> list[dict[str, object]]:
+    """Search Apartments.com rentals via RealtyAPI with a raw key.
+
+    One request per location (each call costs 1 credit; free tier is
+    250/month). Query: {"location": "City, ST" or a ZIP, plus any of the
+    API's filter params such as priceRange "min:1500,max:4000"}.
+    """
+    if not api_key or not query.get("location"):
+        return []
+    url = REALTYAPI_APARTMENTS_URL + "?" + urllib.parse.urlencode(
+        _realtyapi_apartments_params(query, limit))
+    data = fetch_json(url, timeout=timeout, headers={"x-realtyapi-key": api_key})
+    items = data.get("searchResults") if isinstance(data, dict) else None
+    return [normalize_realtyapi_apartments(it) for it in (items or []) if isinstance(it, dict)]
+
+
+def realtyapi_apartments_via_connector(query: dict[str, object],
+                                       limit: int = 50) -> list[dict[str, object]]:
+    """Same search via the stored Muse credential (custom.realtyapi)."""
+    if not query.get("location"):
+        return []
+    args = ["--provider", "apartments", "--path", "/search/bylocation"]
+    for k, v in _realtyapi_apartments_params(query, limit).items():
+        args += ["--param", f"{k}={v}"]
+    data = _realtyapi_cli(args)
+    items = data.get("searchResults") if isinstance(data, dict) else None
+    return [normalize_realtyapi_apartments(it) for it in (items or []) if isinstance(it, dict)]
+
+
+def realtyapi_locations(prefs: dict) -> list[str]:
+    """Build RealtyAPI location strings from preferences (ZIP wins)."""
+    out: list[str] = []
+    for loc in prefs.get("locations") or []:
+        if not isinstance(loc, dict):
+            continue
+        zip_code = str(loc.get("zipCode") or loc.get("zip") or "")
+        city, state = str(loc.get("city") or ""), str(loc.get("state") or "")
+        if zip_code:
+            out.append(zip_code)
+        elif city and state:
+            out.append(f"{city}, {state}")
+        elif city:
+            out.append(city)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1013,6 +1178,27 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     notes.append(f"{name}: no raw RENTCAST_API_KEY and the Muse "
                                  f"connector returned nothing (see stderr); add a key "
                                  f"to ~/.config/apartmentfinder.env or connect RentCast in Muse")
+            elif kind == "realtyapi-apartments":
+                key = api_key_for(str(source.get("api_key_env") or "REALTYAPI_API_KEY"))
+                base_query = source.get("query") or {}
+                locations = [str(base_query["location"])] if base_query.get("location") else []
+                if source.get("from_preferences"):
+                    locations = realtyapi_locations(prefs) or locations
+                for loc in locations:
+                    q = {**base_query, "location": loc}
+                    if key:
+                        got = realtyapi_apartments_listings(key, q, limit=limit)
+                    else:
+                        got = realtyapi_apartments_via_connector(q, limit=limit)
+                    records.extend(got)
+                    print(f"{name}: realtyapi-apartments location {loc!r} -> {len(got)} listings")
+                if not locations:
+                    notes.append(f"{name}: no location configured (set query.location "
+                                 f"or from_preferences with locations in preferences.json)")
+                elif not key and not records:
+                    notes.append(f"{name}: no raw REALTYAPI_API_KEY and the Muse "
+                                 f"connector returned nothing (see stderr); add a key "
+                                 f"to ~/.config/apartmentfinder.env or connect RealtyAPI in Muse")
             elif kind == "realty-us":
                 key = api_key_for(str(source.get("api_key_env") or "RAPIDAPI_KEY"))
                 if not key:
